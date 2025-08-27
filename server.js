@@ -16,7 +16,7 @@ const comidaRoutes = require('./comida');
 // Middleware para habilitar CORS en todas las rutas
 // Si quieres restringir el acceso a ciertos dominios, puedes hacerlo de la siguiente manera:
 const corsOptions = {
- origin: 'https://tudominio.com',
+ origin: 'https://foodsaver0.netlify.app/',
  };
 app.use(cors());  // Esto permite solicitudes desde cualquier origen (si quieres más control, pasa corsOptions aquí)
 
