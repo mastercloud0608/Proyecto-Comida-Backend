@@ -4,55 +4,63 @@ const express = require('express');
 const cors = require('cors');
 
 const app = express();
-
-// Puerto (Render/producción o local)
 const port = process.env.PORT || 3000;
 
-// Rutas
+// Routers
 const authRoutes = require('./auth');
 const comidaRoutes = require('./comida');
+const pedidosRoutes = require('./pedidos'); // <= asegúrate que este archivo exista
 
-// CORS: permitir Netlify y entornos locales de desarrollo
+// CORS: Netlify + entornos locales
 const allowedOrigins = [
   'https://foodsaver0.netlify.app',
   'http://localhost:3000',
-  'http://localhost:5173',     // Vite
-  'http://127.0.0.1:5500',     // Live Server
+  'http://localhost:5173',
+  'http://127.0.0.1:5500',
   'http://localhost:5500'
 ];
 
 app.use(cors({
   origin(origin, cb) {
-    // Permite clientes sin origin (curl/Postman)
     if (!origin) return cb(null, true);
     if (allowedOrigins.includes(origin)) return cb(null, true);
     return cb(new Error('Not allowed by CORS'));
   },
-  methods: ['GET','POST','PUT','DELETE','OPTIONS'],
+  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
   allowedHeaders: ['Content-Type','Authorization'],
   credentials: true
 }));
 app.options('*', cors());
 
-// Parseo JSON
 app.use(express.json());
 
-// Rutas de la API
-app.use('/auth', authRoutes);   // -> /auth/*
-app.use('/api', comidaRoutes);  // -> /api/comidas, etc.
+// Helper para evitar pasar URLs completas en paths
+function mount(path, router) {
+  if (typeof path !== 'string' || !path.startsWith('/')) {
+    throw new Error(`Ruta inválida para app.use: "${path}" (debe empezar con "/")`);
+  }
+  app.use(path, router);
+}
 
-// Healthcheck / raíz
+// Montaje de rutas (SIEMPRE paths relativos)
+mount('/auth', authRoutes);     // -> /auth/*
+mount('/api', comidaRoutes);    // -> /api/comidas...
+mount('/api', pedidosRoutes);   // -> /api/pedidos...
+
+// Healthcheck
+app.get('/__health', (req, res) => res.json({ ok: true }));
+
+// Root
 app.get('/', (req, res) => {
   res.send('¡Bienvenido a la API de comidas y login con PostgreSQL!');
 });
 
 // Manejo de errores
 app.use((err, req, res, next) => {
-  console.error(err.stack);
+  console.error(err.stack || err);
   res.status(err.status || 500).send(err.message || 'Algo salió mal!');
 });
 
-// Levantar servidor
 app.listen(port, () => {
   console.log(`Servidor corriendo en http://localhost:${port}`);
 });
