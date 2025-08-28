@@ -1,54 +1,58 @@
+// server.js
+require('dotenv').config();
 const express = require('express');
-const cors = require('cors'); // Importamos el paquete cors
-const dotenv = require('dotenv'); // Importamos dotenv para usar variables de entorno
+const cors = require('cors');
+
 const app = express();
 
-// Cargar las variables de entorno desde el archivo .env
-dotenv.config();
-
-// Configuramos el puerto para que se pueda usar en local y en producción
+// Puerto (Render/producción o local)
 const port = process.env.PORT || 3000;
 
 // Rutas
 const authRoutes = require('./auth');
 const comidaRoutes = require('./comida');
 
-// Middleware para habilitar CORS en todas las rutas
+// CORS: permitir Netlify y entornos locales de desarrollo
+const allowedOrigins = [
+  'https://foodsaver0.netlify.app',
+  'http://localhost:3000',
+  'http://localhost:5173',     // Vite
+  'http://127.0.0.1:5500',     // Live Server
+  'http://localhost:5500'
+];
+
 app.use(cors({
-  origin: [
-    'https://foodsaver0.netlify.app',
-    'http://localhost:3000',
-    'http://localhost:5173',
-    'http://127.0.0.1:5500',
-    'http://localhost:5500'
-  ],
+  origin(origin, cb) {
+    // Permite clientes sin origin (curl/Postman)
+    if (!origin) return cb(null, true);
+    if (allowedOrigins.includes(origin)) return cb(null, true);
+    return cb(new Error('Not allowed by CORS'));
+  },
   methods: ['GET','POST','PUT','DELETE','OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type','Authorization'],
   credentials: true
 }));
 app.options('*', cors());
 
-// Middleware para poder parsear datos JSON
+// Parseo JSON
 app.use(express.json());
 
-// Usamos las rutas de autenticación
-app.use('/auth', authRoutes);
+// Rutas de la API
+app.use('/auth', authRoutes);   // -> /auth/*
+app.use('/api', comidaRoutes);  // -> /api/comidas, etc.
 
-// Usamos las rutas de comida
-app.use('/api', comidaRoutes);
-
-// Ruta principal
+// Healthcheck / raíz
 app.get('/', (req, res) => {
   res.send('¡Bienvenido a la API de comidas y login con PostgreSQL!');
 });
 
-// El servidor escucha en el puerto configurado
-app.listen(port, () => {
-  console.log(`Servidor corriendo en http://localhost:${port}`);
-});
-
-// Manejo de errores (si algo sale mal)
+// Manejo de errores
 app.use((err, req, res, next) => {
   console.error(err.stack);
-  res.status(500).send('Algo salió mal!');
+  res.status(err.status || 500).send(err.message || 'Algo salió mal!');
+});
+
+// Levantar servidor
+app.listen(port, () => {
+  console.log(`Servidor corriendo en http://localhost:${port}`);
 });
