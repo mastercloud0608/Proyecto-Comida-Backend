@@ -164,24 +164,21 @@ router.get('/pedidos/:id', async (req, res) => {
  * El precio unitario se toma de "comidas.precio" en el momento del pedido.
  * -----------------------------------------*/
 router.post('/pedidos', async (req, res) => {
-  const usuario_id = toInt(req.body?.usuario_id);
-  const comida_id = toInt(req.body?.comida_id);
-  const cantidad_single = toPosInt(req.body?.cantidad);
-  const itemsBody = Array.isArray(req.body?.items) ? req.body.items : null;
+  const { 
+    comida_id, 
+    nombre_cliente, 
+    email_cliente, 
+    telefono_cliente, 
+    direccion, 
+    cantidad, 
+    notas 
+  } = req.body;
 
-  if (usuario_id === null) {
-    return res.status(400).json({ mensaje: 'usuario_id es requerido' });
-  }
-
-  // Normalizamos a una lista de items
-  let items = [];
-  if (itemsBody && itemsBody.length) {
-    items = itemsBody.map(i => ({
-      comida_id: toInt(i.comida_id),
-      cantidad: toPosInt(i.cantidad)
-    })).filter(i => i.comida_id !== null && i.cantidad !== null);
-  } else if (comida_id !== null && cantidad_single !== null) {
-    items = [{ comida_id, cantidad: cantidad_single }];
+  // Validación de campos requeridos
+  if (!comida_id || !nombre_cliente || !email_cliente || !cantidad) {
+    return res.status(400).json({ 
+      mensaje: 'Los campos comida_id, nombre_cliente, email_cliente y cantidad son requeridos' 
+    });
   }
 
   if (!items.length) {
@@ -199,36 +196,32 @@ router.post('/pedidos', async (req, res) => {
       return res.status(404).json({ mensaje: 'Usuario no encontrado' });
     }
 
-    // Verificar comidas y obtener precios actuales
-    const comidaIds = items.map(i => i.comida_id);
-    const { rows: comidas } = await client.query(
-      'SELECT id, precio FROM comidas WHERE id = ANY($1::int[])',
-      [comidaIds]
-    );
-    const precioMap = new Map(comidas.map(c => [c.id, Number(c.precio)]));
+    const precioUnitario = parseFloat(comidaResult.rows[0].precio);
+    const precioTotal = precioUnitario * parseInt(cantidad);
 
-    for (const it of items) {
-      if (!precioMap.has(it.comida_id)) {
-        await client.query('ROLLBACK');
-        return res.status(404).json({ mensaje: `Comida no encontrada: id=${it.comida_id}` });
-      }
-    }
-
-    // Crear pedido
-    const { rows: pedidoRows } = await client.query(
-      'INSERT INTO pedidos (usuario_id, estado) VALUES ($1, $2) RETURNING id, usuario_id, estado, fecha',
-      [usuario_id, 'pendiente']
-    );
-    const pedido = pedidoRows[0];
-
-    // Insertar items (precio unitario fijo al momento del pedido)
-    for (const it of items) {
-      await client.query(
-        `INSERT INTO pedido_comida (pedido_id, comida_id, cantidad, precio)
-         VALUES ($1, $2, $3, $4)`,
-        [pedido.id, it.comida_id, it.cantidad, precioMap.get(it.comida_id)]
-      );
-    }
+    // Crear el pedido
+    const result = await client.query(`
+      INSERT INTO pedido (
+        comida_id, 
+        nombre_cliente, 
+        email_cliente, 
+        telefono_cliente, 
+        direccion, 
+        cantidad, 
+        precio_total, 
+        notas
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
+      RETURNING *
+    `, [
+      comida_id, 
+      nombre_cliente, 
+      email_cliente, 
+      telefono_cliente, 
+      direccion, 
+      cantidad, 
+      precioTotal, 
+      notas
+    ]);
 
     await client.query('COMMIT');
 
@@ -296,14 +289,49 @@ router.delete('/pedidos/:id', async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    const { rows: exists } = await client.query('SELECT id FROM pedidos WHERE id = $1', [id]);
-    if (!exists.length) {
+    // Obtener el pedido actual
+    const pedidoActual = await client.query('SELECT * FROM pedido WHERE id = $1', [id]);
+    
+    if (pedidoActual.rows.length === 0) {
       await client.query('ROLLBACK');
       return res.status(404).json({ mensaje: 'Pedido no encontrado' });
     }
 
-    await client.query('DELETE FROM pedido_comida WHERE pedido_id = $1', [id]);
-    await client.query('DELETE FROM pedidos WHERE id = $1', [id]);
+    const pedido = pedidoActual.rows[0];
+
+    // Si cambió la cantidad, recalcular el precio total
+    let precioTotal = pedido.precio_total;
+    if (parseInt(cantidad) !== parseInt(pedido.cantidad)) {
+      const comidaResult = await client.query('SELECT precio FROM comida WHERE id = $1', [pedido.comida_id]);
+      const precioUnitario = parseFloat(comidaResult.rows[0].precio);
+      precioTotal = precioUnitario * parseInt(cantidad);
+    }
+
+    // Actualizar el pedido
+    const result = await client.query(`
+      UPDATE pedido 
+      SET nombre_cliente = $1, 
+          email_cliente = $2, 
+          telefono_cliente = $3, 
+          direccion = $4, 
+          cantidad = $5, 
+          precio_total = $6, 
+          estado = $7, 
+          notas = $8,
+          fecha_actualizacion = CURRENT_TIMESTAMP
+      WHERE id = $9 
+      RETURNING *
+    `, [
+      nombre_cliente, 
+      email_cliente, 
+      telefono_cliente, 
+      direccion, 
+      cantidad, 
+      precioTotal, 
+      estado || pedido.estado, 
+      notas, 
+      id
+    ]);
 
     await client.query('COMMIT');
     res.status(204).send();
@@ -316,54 +344,98 @@ router.delete('/pedidos/:id', async (req, res) => {
   }
 });
 
-/* -------------------------------------------
- * GET /api/pedidos/estadisticas/resumen
- * - Ventas = SUM(cantidad * precio_unitario)
- * -----------------------------------------*/
+// Ruta PATCH para actualizar solo el estado de un pedido
+router.patch('/pedidos/:id/estado', async (req, res) => {
+  const { id } = req.params;
+  const { estado } = req.body;
+
+  // Validar estado
+  const estadosValidos = ['pendiente', 'confirmado', 'en-preparacion', 'listo', 'entregado', 'cancelado'];
+  if (!estado || !estadosValidos.includes(estado)) {
+    return res.status(400).json({ 
+      mensaje: 'Estado requerido. Estados permitidos: ' + estadosValidos.join(', ')
+    });
+  }
+
+  try {
+    const result = await pool.query(`
+      UPDATE pedido 
+      SET estado = $1, fecha_actualizacion = CURRENT_TIMESTAMP
+      WHERE id = $2 
+      RETURNING *
+    `, [estado, id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ mensaje: 'Pedido no encontrado' });
+    }
+
+    // Obtener el pedido completo actualizado
+    const pedidoCompleto = await pool.query('SELECT * FROM vista_pedidos_completos WHERE id = $1', [id]);
+
+    res.json(pedidoCompleto.rows[0]);
+  } catch (error) {
+    console.error('Error al actualizar estado del pedido:', error);
+    res.status(500).json({ 
+      mensaje: 'Error al actualizar el estado del pedido', 
+      error: error.message 
+    });
+  }
+});
+
+// Ruta DELETE para eliminar un pedido
+router.delete('/pedidos/:id', async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const result = await pool.query('DELETE FROM pedido WHERE id = $1 RETURNING *', [id]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ mensaje: 'Pedido no encontrado' });
+    }
+
+    res.status(204).send(); // No hay contenido, pero la operación fue exitosa
+  } catch (error) {
+    console.error('Error al eliminar pedido:', error);
+    res.status(500).json({ 
+      mensaje: 'Error al eliminar el pedido', 
+      error: error.message 
+    });
+  }
+});
+
+// Ruta GET para obtener estadísticas de pedidos
 router.get('/pedidos/estadisticas/resumen', async (req, res) => {
   try {
-    const { rows: porEstado } = await pool.query(
-      `
-      SELECT p.estado,
-             COUNT(DISTINCT p.id) AS cantidad,
-             COALESCE(SUM(pc.cantidad * pc.precio), 0) AS total_ventas
-      FROM pedidos p
-      LEFT JOIN pedido_comida pc ON pc.pedido_id = p.id
-      GROUP BY p.estado
+    const result = await pool.query(`
+      SELECT 
+        estado,
+        COUNT(*) as cantidad,
+        SUM(precio_total) as total_ventas
+      FROM pedido 
+      GROUP BY estado
       ORDER BY cantidad DESC
-      `
-    );
+    `);
 
-    const { rows: totalPedidos } = await pool.query(
-      'SELECT COUNT(*)::int AS total FROM pedidos'
-    );
-
-    const { rows: hoy } = await pool.query(
-      `
-      SELECT
-        COUNT(DISTINCT p.id)::int AS pedidos_hoy,
-        COALESCE(SUM(pc.cantidad * pc.precio), 0) AS ventas_hoy
-      FROM pedidos p
-      LEFT JOIN pedido_comida pc ON pc.pedido_id = p.id
-      WHERE DATE(p.fecha) = CURRENT_DATE
-      `
-    );
+    const totalPedidos = await pool.query('SELECT COUNT(*) as total FROM pedido');
+    const ventasHoy = await pool.query(`
+      SELECT 
+        COUNT(*) as pedidos_hoy,
+        COALESCE(SUM(precio_total), 0) as ventas_hoy
+      FROM pedido 
+      WHERE DATE(fecha_pedido) = CURRENT_DATE
+    `);
 
     res.json({
-      por_estado: porEstado.map(r => ({
-        estado: r.estado,
-        cantidad: Number(r.cantidad),
-        total_ventas: Number(r.total_ventas)
-      })),
-      total_pedidos: Number(totalPedidos[0].total),
-      estadisticas_hoy: {
-        pedidos_hoy: Number(hoy[0].pedidos_hoy),
-        ventas_hoy: Number(hoy[0].ventas_hoy)
-      }
+      por_estado: result.rows,
+      total_pedidos: parseInt(totalPedidos.rows[0].total),
+      estadisticas_hoy: ventasHoy.rows[0]
     });
   } catch (error) {
-    console.error('GET /pedidos/estadisticas/resumen error:', error);
-    res.status(500).json({ mensaje: 'Error al obtener estadísticas', error: error.message });
+    console.error('Error al obtener estadísticas:', error);
+    res.status(500).json({ 
+      mensaje: 'Error al obtener estadísticas', 
+      error: error.message 
+    });
   }
 });
 
