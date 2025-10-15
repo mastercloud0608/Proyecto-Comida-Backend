@@ -2,24 +2,24 @@
 'use strict';
 const express = require('express');
 const cors = require('cors');
-const dotenv = require('dotenv');
+require('dotenv-flow').config();      // lee .env* según NODE_ENV
 
-dotenv.config();
+// Inicializa conexión a Postgres (hace ping y loguea)
+require('./db');
+
+const { runMigrations } = require('./migrate'); // <-- para /admin/run-migrations
 
 const app = express();
 const isProd = process.env.NODE_ENV === 'production';
 const port = process.env.PORT || 3000;
 
-// Inicializa conexión a Postgres y logs (ping inicial)
-require('./db');
-
-// ====== CORS ======
+/* ================= CORS ================= */
 const allowlist = [
   'http://localhost:3000',
   'http://localhost:5500',
   'http://127.0.0.1:5500',
   'https://foodsaver0.netlify.app',
-  // 'https://proyecto-comida-backend.onrender.com', // agrega si necesitas
+  // 'https://proyecto-comida-backend.onrender.com', // agrega si lo necesitas
 ];
 
 const allowedRegexes = [
@@ -41,42 +41,65 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-// ⚠️ En Express 5 no usar '*'.
-// Si quieres preflight explícito, usa '/*' (o coméntalo si no lo necesitas).
-// app.options('/*', cors(corsOptions)); // opcional
+// Preflight (si lo necesitas, déjalo activo)
+app.options('*', cors(corsOptions));
 
-// ====== Body parsers ======
+/* ============== Body parsers ============== */
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// ====== Rutas ======
+/* ============== Rutas ============== */
 const authRoutes = require('./auth');
 const comidaRoutes = require('./comida');
 const pedidoRoutes = require('./pedido');
 const categoriaRoutes = require('./categoria');
 const pago = require('./pago');
 
-// Healthcheck
+/* Healthcheck */
 app.get('/health', (_req, res) => {
   res.json({ ok: true, env: process.env.NODE_ENV || 'development' });
 });
 
-// Auth
+/* Auth */
 app.use('/auth', authRoutes);
 
-// API
+/* API */
 app.use('/api', comidaRoutes);
 app.use('/api', pedidoRoutes);
 app.use('/api', categoriaRoutes);
 
-// Pago (Stripe)
+/* ---- Admin: correr migraciones (temporal) ----
+   Añade en Render una var de entorno: INIT_DB_SECRET
+   y llama: POST /admin/run-migrations con header X-Init-Secret: <valor>
+*/
+app.post('/admin/run-migrations', async (req, res) => {
+  try {
+    const secret = req.header('X-Init-Secret');
+    if (!process.env.INIT_DB_SECRET || secret !== process.env.INIT_DB_SECRET) {
+      return res.status(401).json({ mensaje: 'No autorizado' });
+    }
+    const result = await runMigrations();
+    res.json({ ok: true, result });
+  } catch (e) {
+    console.error('Migraciones error:', e);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+/* Pago (Stripe) */
 app.post('/realizar-pago', async (req, res) => {
   const { name, email, cardToken, productId, amount, currency } = req.body;
   try {
     const customerId = await pago.createUser(name, email);
     const paymentMethodId = await pago.createPaymentMethod(cardToken);
     await pago.addPaymentMethodToUser(customerId, paymentMethodId);
-    const paymentIntent = await pago.createPayment(customerId, paymentMethodId, productId, amount, currency);
+    const paymentIntent = await pago.createPayment(
+      customerId,
+      paymentMethodId,
+      productId,
+      amount,
+      currency
+    );
     res.status(200).json({ mensaje: 'Pago realizado correctamente', paymentId: paymentIntent.id });
   } catch (error) {
     console.error('Error al realizar el pago:', error.message);
@@ -84,17 +107,17 @@ app.post('/realizar-pago', async (req, res) => {
   }
 });
 
-// Raíz
+/* Raíz */
 app.get('/', (_req, res) => {
   res.send('¡Enai, enai!');
 });
 
-// 404
+/* 404 */
 app.use((req, res, _next) => {
   res.status(404).json({ mensaje: 'Ruta no encontrada', path: req.originalUrl });
 });
 
-// Errores
+/* Errores */
 app.use((err, req, res, _next) => {
   const status = err.status || 500;
   console.error('🔥 Error:', {
@@ -107,7 +130,7 @@ app.use((err, req, res, _next) => {
   res.status(status).json({ mensaje: 'Error interno del servidor', error: err.message });
 });
 
-// Escucha
+/* Escucha */
 app.listen(port, () => {
   console.log(`🚀 Servidor corriendo en http://localhost:${port} (env: ${process.env.NODE_ENV || 'development'})`);
 });

@@ -2,6 +2,7 @@
 'use strict';
 const { Pool } = require('pg');
 require('dotenv-flow').config(); // carga .env*, respeta NODE_ENV
+const { runMigrations } = require('./migrate');
 
 
 const isProd = process.env.NODE_ENV === 'production';
@@ -36,5 +37,7 @@ pool.on('error', (err) => console.error('💥 Error en el pool PG:', err));
     console.error('⛔ No se pudo conectar a PostgreSQL:', e.message);
   }
 })();
+
+
 
 module.exports = pool;
