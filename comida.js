@@ -1,203 +1,247 @@
-// comida.js
+'use strict';
+// comida.js mejorado
 const express = require('express');
-const pool = require('./db'); // Conexión a la base de datos (pg Pool)
+const pool = require('./db'); // pg Pool
 const router = express.Router();
 
-/**
- * Utilidades y validaciones
- */
+/* =================== Utilidades =================== */
 const CATEGORIAS_PERMITIDAS = new Set([
   'Desayuno', 'Almuerzo', 'Cena', 'Postre', 'Bebida', 'Snack'
 ]);
 
-const toInt = (v) => {
-  const n = Number(v);
-  return Number.isInteger(n) && n > 0 ? n : null;
-};
+const MAX_LIMIT = 200;
+const DEFAULT_LIMIT = 100;
+const DEFAULT_OFFSET = 0;
 
+const norm = (t) => (typeof t === 'string' ? t.trim() : '');
+const toIntPos = (v) => {
+  const n = Number(v);
+  return Number.isInteger(n) && n >= 0 ? n : null;
+};
 const toPrecio = (v) => {
+  if (v === '' || v === null || typeof v === 'undefined') return null;
   const n = Number(v);
   return Number.isFinite(n) && n >= 0 ? n : null;
 };
-
-const normTexto = (t) => (typeof t === 'string' ? t.trim() : '');
 const isCategoriaValida = (c) => !c || CATEGORIAS_PERMITIDAS.has(c);
+const mapPrecioNumber = (row) =>
+  row ? { ...row, precio: row.precio !== null ? Number(row.precio) : null } : row;
 
+// Evita repetir try/catch
+const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+// Ordenamiento seguro
+const parseSort = (orderByRaw, orderRaw) => {
+  const whitelist = { id: 'id', nombre: 'nombre', precio: 'precio' };
+  const key = whitelist[norm(orderByRaw).toLowerCase()] || 'id';
+  const dir = norm(orderRaw).toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+  return { key, dir };
+};
+
+// Respuesta de error consistente
+const badRequest = (res, mensaje) => res.status(400).json({ mensaje });
+
+/* =================== Rutas =================== */
 /**
  * GET /api/comidas
- * Soporta filtros opcionales:
+ * Filtros:
  *  - ?categoria=Almuerzo
- *  - ?q=pollo            (busca en nombre)
- *  - ?limit=10&offset=0  (paginación)
+ *  - ?q=pollo
+ *  - ?limit=10&offset=0
  *  - ?orderBy=precio|nombre|id  & order=asc|desc
+ * Respuesta: { items: [...], meta: { total, limit, offset, orderBy, order } }
  */
-router.get('/comidas', async (req, res) => {
-  try {
-    const categoria = normTexto(req.query.categoria);
-    const q = normTexto(req.query.q);
+router.get('/comidas', asyncHandler(async (req, res) => {
+  const categoria = norm(req.query.categoria);
+  const q = norm(req.query.q);
 
-    const limit = toInt(req.query.limit) ?? 100;   // límite por defecto
-    const offset = toInt(req.query.offset) ?? 0;
+  let limit = toIntPos(req.query.limit);
+  let offset = toIntPos(req.query.offset);
+  limit = limit === null ? DEFAULT_LIMIT : Math.min(limit, MAX_LIMIT);
+  offset = offset === null ? DEFAULT_OFFSET : offset;
 
-    const orderByRaw = normTexto(req.query.orderBy).toLowerCase();
-    const orderRaw = normTexto(req.query.order).toLowerCase();
+  const { key: orderBy, dir: order } = parseSort(req.query.orderBy, req.query.order);
 
-    const orderWhitelist = { id: 'id', nombre: 'nombre', precio: 'precio' };
-    const orderBy = orderWhitelist[orderByRaw] || 'id';
-    const order = orderRaw === 'asc' ? 'ASC' : 'DESC';
-
-    const where = [];
-    const params = [];
-
-    if (categoria && isCategoriaValida(categoria)) {
-      params.push(categoria);
-      where.push(`categoria = $${params.length}`);
-    }
-
-    if (q) {
-      params.push(`%${q}%`);
-      where.push(`nombre ILIKE $${params.length}`);
-    }
-
-    let sql = `SELECT id, nombre, categoria, precio FROM comidas`;
-    if (where.length) sql += ` WHERE ${where.join(' AND ')}`;
-    sql += ` ORDER BY ${orderBy} ${order} LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
-
-    params.push(limit, offset);
-
-    const result = await pool.query(sql, params);
-
-    // Opcional: convertir precio a número para el frontend
-    const rows = result.rows.map(r => ({
-      ...r,
-      precio: r.precio !== null ? Number(r.precio) : null
-    }));
-
-    res.json(rows);
-  } catch (error) {
-    console.error('GET /comidas error:', error);
-    res.status(500).json({ mensaje: 'Error al obtener las comidas', error: error.message });
+  if (categoria && !isCategoriaValida(categoria)) {
+    return badRequest(res, 'Categoría inválida');
   }
-});
+
+  const where = [];
+  const params = [];
+
+  if (categoria) {
+    params.push(categoria);
+    where.push(`categoria = $${params.length}`);
+  }
+  if (q) {
+    params.push(`%${q}%`);
+    where.push(`nombre ILIKE $${params.length}`);
+  }
+
+  // Nota: usamos COUNT(*) OVER() para traer total sin segunda consulta
+  let sql = `
+    SELECT id, nombre, categoria, precio,
+           COUNT(*) OVER() AS total
+    FROM comidas
+  `;
+  if (where.length) sql += ` WHERE ${where.join(' AND ')}`;
+  params.push(limit, offset);
+  sql += ` ORDER BY ${orderBy} ${order} LIMIT $${params.length - 1} OFFSET $${params.length}`;
+
+  const { rows } = await pool.query(sql, params);
+  const total = rows[0]?.total ? Number(rows[0].total) : 0;
+  const items = rows.map(({ total: _t, ...r }) => mapPrecioNumber(r));
+
+  res.json({
+    items,
+    meta: { total, limit, offset, orderBy, order }
+  });
+}));
 
 /**
  * GET /api/comidas/:id
  */
-router.get('/comidas/:id', async (req, res) => {
-  const id = toInt(req.params.id);
-  if (!id) return res.status(400).json({ mensaje: 'ID inválido' });
+router.get('/comidas/:id', asyncHandler(async (req, res) => {
+  const id = toIntPos(req.params.id);
+  if (id === null) return badRequest(res, 'ID inválido');
 
-  try {
-    const result = await pool.query(
-      'SELECT id, nombre, categoria, precio FROM comidas WHERE id = $1',
-      [id]
-    );
-    if (result.rows.length === 0) {
-      return res.status(404).json({ mensaje: 'Comida no encontrada' });
-    }
+  const { rows } = await pool.query(
+    'SELECT id, nombre, categoria, precio FROM comidas WHERE id = $1',
+    [id]
+  );
+  if (rows.length === 0) return res.status(404).json({ mensaje: 'Comida no encontrada' });
 
-    const row = result.rows[0];
-    row.precio = row.precio !== null ? Number(row.precio) : null;
-
-    res.json(row);
-  } catch (error) {
-    console.error('GET /comidas/:id error:', error);
-    res.status(500).json({ mensaje: 'Error al obtener la comida', error: error.message });
-  }
-});
+  res.json(mapPrecioNumber(rows[0]));
+}));
 
 /**
  * POST /api/comidas
  * Body: { nombre, categoria?, precio }
  */
-router.post('/comidas', async (req, res) => {
-  const nombre = normTexto(req.body?.nombre);
-  const categoria = normTexto(req.body?.categoria);
+router.post('/comidas', asyncHandler(async (req, res) => {
+  const nombre = norm(req.body?.nombre);
+  const categoria = norm(req.body?.categoria);
   const precio = toPrecio(req.body?.precio);
 
-  if (!nombre || precio === null) {
-    return res.status(400).json({ mensaje: 'El nombre y el precio son requeridos' });
+  if (!nombre || nombre.length > 120) {
+    return badRequest(res, 'El nombre es requerido y debe tener ≤ 120 caracteres');
+  }
+  if (precio === null) {
+    return badRequest(res, 'El precio es requerido y debe ser un número ≥ 0');
   }
   if (!isCategoriaValida(categoria)) {
-    return res.status(400).json({ mensaje: 'Categoría inválida' });
+    return badRequest(res, 'Categoría inválida');
   }
 
-  try {
-    const result = await pool.query(
-      'INSERT INTO comidas (nombre, categoria, precio) VALUES ($1, $2, $3) RETURNING id, nombre, categoria, precio',
-      [nombre, categoria || null, precio]
-    );
+  const { rows } = await pool.query(
+    `INSERT INTO comidas (nombre, categoria, precio)
+     VALUES ($1, $2, $3)
+     RETURNING id, nombre, categoria, precio`,
+    [nombre, categoria || null, precio]
+  );
 
-    const row = result.rows[0];
-    row.precio = row.precio !== null ? Number(row.precio) : null;
-
-    res.status(201).json(row);
-  } catch (error) {
-    console.error('POST /comidas error:', error);
-    res.status(500).json({ mensaje: 'Error al crear la comida', error: error.message });
-  }
-});
+  const created = mapPrecioNumber(rows[0]);
+  res
+    .status(201)
+    .location(`/api/comidas/${created.id}`)
+    .json(created);
+}));
 
 /**
- * PUT /api/comidas/:id
+ * PUT /api/comidas/:id   (reemplazo completo)
  * Body: { nombre, categoria?, precio }
  */
-router.put('/comidas/:id', async (req, res) => {
-  const id = toInt(req.params.id);
-  if (!id) return res.status(400).json({ mensaje: 'ID inválido' });
+router.put('/comidas/:id', asyncHandler(async (req, res) => {
+  const id = toIntPos(req.params.id);
+  if (id === null) return badRequest(res, 'ID inválido');
 
-  const nombre = normTexto(req.body?.nombre);
-  const categoria = normTexto(req.body?.categoria);
+  const nombre = norm(req.body?.nombre);
+  const categoria = norm(req.body?.categoria);
   const precio = toPrecio(req.body?.precio);
 
-  if (!nombre || precio === null) {
-    return res.status(400).json({ mensaje: 'El nombre y el precio son requeridos' });
+  if (!nombre || nombre.length > 120) {
+    return badRequest(res, 'El nombre es requerido y debe tener ≤ 120 caracteres');
+  }
+  if (precio === null) {
+    return badRequest(res, 'El precio es requerido y debe ser un número ≥ 0');
   }
   if (!isCategoriaValida(categoria)) {
-    return res.status(400).json({ mensaje: 'Categoría inválida' });
+    return badRequest(res, 'Categoría inválida');
   }
 
-  try {
-    const result = await pool.query(
-      'UPDATE comidas SET nombre = $1, categoria = $2, precio = $3 WHERE id = $4 RETURNING id, nombre, categoria, precio',
-      [nombre, categoria || null, precio, id]
-    );
+  const { rows } = await pool.query(
+    `UPDATE comidas
+       SET nombre = $1, categoria = $2, precio = $3
+     WHERE id = $4
+     RETURNING id, nombre, categoria, precio`,
+    [nombre, categoria || null, precio, id]
+  );
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ mensaje: 'Comida no encontrada' });
-    }
+  if (rows.length === 0) return res.status(404).json({ mensaje: 'Comida no encontrada' });
+  res.json(mapPrecioNumber(rows[0]));
+}));
 
-    const row = result.rows[0];
-    row.precio = row.precio !== null ? Number(row.precio) : null;
+/**
+ * PATCH /api/comidas/:id   (actualización parcial)
+ * Body: { nombre?, categoria?, precio? }
+ */
+router.patch('/comidas/:id', asyncHandler(async (req, res) => {
+  const id = toIntPos(req.params.id);
+  if (id === null) return badRequest(res, 'ID inválido');
 
-    res.json(row);
-  } catch (error) {
-    console.error('PUT /comidas/:id error:', error);
-    res.status(500).json({ mensaje: 'Error al actualizar la comida', error: error.message });
+  const nombre = req.body?.nombre !== undefined ? norm(req.body.nombre) : undefined;
+  const categoria = req.body?.categoria !== undefined ? norm(req.body.categoria) : undefined;
+  const precio = req.body?.precio !== undefined ? toPrecio(req.body.precio) : undefined;
+
+  const sets = [];
+  const params = [];
+  if (nombre !== undefined) {
+    if (!nombre || nombre.length > 120) return badRequest(res, 'Nombre inválido');
+    params.push(nombre); sets.push(`nombre = $${params.length}`);
   }
-});
+  if (categoria !== undefined) {
+    if (!isCategoriaValida(categoria)) return badRequest(res, 'Categoría inválida');
+    params.push(categoria || null); sets.push(`categoria = $${params.length}`);
+  }
+  if (precio !== undefined) {
+    if (precio === null) return badRequest(res, 'Precio inválido');
+    params.push(precio); sets.push(`precio = $${params.length}`);
+  }
+
+  if (sets.length === 0) return badRequest(res, 'No hay campos para actualizar');
+
+  params.push(id);
+  const { rows } = await pool.query(
+    `UPDATE comidas SET ${sets.join(', ')} WHERE id = $${params.length}
+     RETURNING id, nombre, categoria, precio`,
+    params
+  );
+  if (rows.length === 0) return res.status(404).json({ mensaje: 'Comida no encontrada' });
+
+  res.json(mapPrecioNumber(rows[0]));
+}));
 
 /**
  * DELETE /api/comidas/:id
  */
-router.delete('/comidas/:id', async (req, res) => {
-  const id = toInt(req.params.id);
-  if (!id) return res.status(400).json({ mensaje: 'ID inválido' });
+router.delete('/comidas/:id', asyncHandler(async (req, res) => {
+  const id = toIntPos(req.params.id);
+  if (id === null) return badRequest(res, 'ID inválido');
 
-  try {
-    const result = await pool.query(
-      'DELETE FROM comidas WHERE id = $1 RETURNING id',
-      [id]
-    );
-    if (result.rows.length === 0) {
-      return res.status(404).json({ mensaje: 'Comida no encontrada' });
-    }
-    // 204: No Content
-    res.status(204).send();
-  } catch (error) {
-    console.error('DELETE /comidas/:id error:', error);
-    res.status(500).json({ mensaje: 'Error al eliminar la comida', error: error.message });
-  }
+  const { rows } = await pool.query(
+    'DELETE FROM comidas WHERE id = $1 RETURNING id',
+    [id]
+  );
+  if (rows.length === 0) return res.status(404).json({ mensaje: 'Comida no encontrada' });
+  res.status(204).send();
+}));
+
+/* =================== Manejador de errores =================== */
+// Debe ir al final del router si lo montas directamente en app.use('/api', router)
+// Si ya tienes un error handler global, puedes omitir este.
+router.use((err, req, res, _next) => {
+  console.error('Error:', err);
+  res.status(500).json({ mensaje: 'Error interno del servidor', error: err.message });
 });
 
 module.exports = router;
