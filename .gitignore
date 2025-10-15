@@ -1,4 +1,4 @@
-# Ignorar el archivo .env
-.env.development
-.env.production
+.env*
+!.env.example
 node_modules/
+git add .gitignore
