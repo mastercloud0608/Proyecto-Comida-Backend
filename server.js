@@ -40,11 +40,7 @@ const corsOptions = {
   credentials: false,
 };
 
-app.use(cors(corsOptions));
-// Preflights válidos en Express 5 (NO usar '*')
-app.options('/api/*', cors(corsOptions));
-app.options('/admin/*', cors(corsOptions));
-app.options('/realizar-pago', cors(corsOptions));
+app.use(cors(corsOptions)); // <-- basta con esto; no declares app.options con '*' ni con '/*'
 
 /* ============== Body parsers ============== */
 app.use(express.json({ limit: '1mb' }));
