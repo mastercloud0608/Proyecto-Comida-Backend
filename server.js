@@ -1,5 +1,6 @@
 // server.js
 'use strict';
+
 const express = require('express');
 const cors = require('cors');
 require('dotenv-flow').config(); // lee .env* según NODE_ENV
@@ -40,7 +41,7 @@ const corsOptions = {
   credentials: false,
 };
 
-app.use(cors(corsOptions)); // <-- basta con esto; no declares app.options con '*' ni con '/*'
+app.use(cors(corsOptions)); // ✅ suficiente
 
 /* ============== Body parsers ============== */
 app.use(express.json({ limit: '1mb' }));
