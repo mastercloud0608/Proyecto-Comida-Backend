@@ -2,12 +2,12 @@
 'use strict';
 const express = require('express');
 const cors = require('cors');
-require('dotenv-flow').config();      // lee .env* según NODE_ENV
+require('dotenv-flow').config(); // lee .env* según NODE_ENV
 
 // Inicializa conexión a Postgres (hace ping y loguea)
 require('./db');
 
-const { runMigrations } = require('./migrate'); // <-- para /admin/run-migrations
+const { runMigrations } = require('./migrate'); // para /admin/run-migrations
 
 const app = express();
 const isProd = process.env.NODE_ENV === 'production';
@@ -41,34 +41,34 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-// Preflight (si lo necesitas, déjalo activo)
+// Preflight
 app.options('*', cors(corsOptions));
 
 /* ============== Body parsers ============== */
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-/* ============== Rutas ============== */
+/* ============== Rutas importadas ============== */
 const authRoutes = require('./auth');
 const comidaRoutes = require('./comida');
 const pedidoRoutes = require('./pedido');
 const categoriaRoutes = require('./categoria');
 const pago = require('./pago');
 
-/* Healthcheck */
+/* ============== Healthcheck ============== */
 app.get('/health', (_req, res) => {
   res.json({ ok: true, env: process.env.NODE_ENV || 'development' });
 });
 
-/* Auth */
+/* ============== Auth ============== */
 app.use('/auth', authRoutes);
 
-/* API */
+/* ============== API ============== */
 app.use('/api', comidaRoutes);
 app.use('/api', pedidoRoutes);
 app.use('/api', categoriaRoutes);
 
-/* ---- Admin: correr migraciones (temporal) ----
+/* ============== Admin: correr migraciones (temporal) ==============
    Añade en Render una var de entorno: INIT_DB_SECRET
    y llama: POST /admin/run-migrations con header X-Init-Secret: <valor>
 */
@@ -86,7 +86,7 @@ app.post('/admin/run-migrations', async (req, res) => {
   }
 });
 
-/* Pago (Stripe) */
+/* ============== Pago (Stripe) ============== */
 app.post('/realizar-pago', async (req, res) => {
   const { name, email, cardToken, productId, amount, currency } = req.body;
   try {
@@ -107,17 +107,17 @@ app.post('/realizar-pago', async (req, res) => {
   }
 });
 
-/* Raíz */
+/* ============== Raíz ============== */
 app.get('/', (_req, res) => {
   res.send('¡Enai, enai!');
 });
 
-/* 404 */
+/* ============== 404 ============== */
 app.use((req, res, _next) => {
   res.status(404).json({ mensaje: 'Ruta no encontrada', path: req.originalUrl });
 });
 
-/* Errores */
+/* ============== Errores ============== */
 app.use((err, req, res, _next) => {
   const status = err.status || 500;
   console.error('🔥 Error:', {
@@ -130,7 +130,7 @@ app.use((err, req, res, _next) => {
   res.status(status).json({ mensaje: 'Error interno del servidor', error: err.message });
 });
 
-/* Escucha */
+/* ============== Escucha ============== */
 app.listen(port, () => {
   console.log(`🚀 Servidor corriendo en http://localhost:${port} (env: ${process.env.NODE_ENV || 'development'})`);
 });
