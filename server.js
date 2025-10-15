@@ -19,11 +19,9 @@ const allowlist = [
   'http://localhost:5500',
   'http://127.0.0.1:5500',
   'https://foodsaver0.netlify.app',
-  // agrega aquí tu dominio público del backend en Render si lo necesitas en otros servicios
-  // 'https://proyecto-comida-backend.onrender.com',
+  // 'https://proyecto-comida-backend.onrender.com', // agrega si necesitas
 ];
 
-// Permite también subdominios de Netlify/Render de forma segura
 const allowedRegexes = [
   /^https?:\/\/([a-z0-9-]+\.)*netlify\.app$/i,
   /^https?:\/\/([a-z0-9-]+\.)*onrender\.com$/i,
@@ -32,7 +30,7 @@ const allowedRegexes = [
 const corsOptions = {
   origin(origin, cb) {
     if (!origin) return cb(null, true); // Postman/cURL
-    if (allowlist.includes(origin) || allowedRegexes.some((rx) => rx.test(origin))) {
+    if (allowlist.includes(origin) || allowedRegexes.some(rx => rx.test(origin))) {
       return cb(null, true);
     }
     return cb(new Error(`CORS bloqueado para origen: ${origin}`));
@@ -43,7 +41,9 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions)); // preflight
+// ⚠️ En Express 5 no usar '*'.
+// Si quieres preflight explícito, usa '/*' (o coméntalo si no lo necesitas).
+// app.options('/*', cors(corsOptions)); // opcional
 
 // ====== Body parsers ======
 app.use(express.json({ limit: '1mb' }));
@@ -56,8 +56,8 @@ const pedidoRoutes = require('./pedido');
 const categoriaRoutes = require('./categoria');
 const pago = require('./pago');
 
-// Healthcheck (útil para Render)
-app.get('/health', (req, res) => {
+// Healthcheck
+app.get('/health', (_req, res) => {
   res.json({ ok: true, env: process.env.NODE_ENV || 'development' });
 });
 
@@ -89,12 +89,12 @@ app.get('/', (_req, res) => {
   res.send('¡Enai, enai!');
 });
 
-// 404 si no coincide ninguna ruta
+// 404
 app.use((req, res, _next) => {
   res.status(404).json({ mensaje: 'Ruta no encontrada', path: req.originalUrl });
 });
 
-// Manejo de errores (debe ir al final SIEMPRE)
+// Errores
 app.use((err, req, res, _next) => {
   const status = err.status || 500;
   console.error('🔥 Error:', {
