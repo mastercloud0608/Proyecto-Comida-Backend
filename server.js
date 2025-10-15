@@ -41,8 +41,10 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-// Preflight
-app.options('*', cors(corsOptions));
+// Preflights válidos en Express 5 (NO usar '*')
+app.options('/api/*', cors(corsOptions));
+app.options('/admin/*', cors(corsOptions));
+app.options('/realizar-pago', cors(corsOptions));
 
 /* ============== Body parsers ============== */
 app.use(express.json({ limit: '1mb' }));
