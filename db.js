@@ -2,8 +2,6 @@
 'use strict';
 const { Pool } = require('pg');
 require('dotenv-flow').config(); // carga .env*, respeta NODE_ENV
-const { runMigrations } = require('./migrate');
-
 
 const isProd = process.env.NODE_ENV === 'production';
 
@@ -28,7 +26,7 @@ const pool = new Pool({
 pool.on('connect', () => console.log('✅ Conectado a PostgreSQL'));
 pool.on('error', (err) => console.error('💥 Error en el pool PG:', err));
 
-// Pequeño “ping” al iniciar (opcional)
+// Ping al iniciar (opcional)
 (async () => {
   try {
     const { rows } = await pool.query('SELECT NOW() as now');
@@ -38,6 +36,4 @@ pool.on('error', (err) => console.error('💥 Error en el pool PG:', err));
   }
 })();
 
-
-
-module.exports = pool;
+module.exports = pool; // 👈 exporta SOLO el Pool

@@ -3,7 +3,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const pool = require('./db'); // 👈 exporta el Pool directamente
+const pool = require('./db'); // 👈 aquí llega el Pool
 
 /**
  * Ejecuta el archivo migrations/001_init.sql dentro de una transacción.
@@ -24,7 +24,7 @@ async function runMigrations() {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query(sql); // Ejecuta todo el script de una sola vez (soporta múltiples sentencias)
+    await client.query(sql); // Ejecuta todo el script (múltiples sentencias soportadas)
     await client.query('COMMIT');
     return { applied: path.basename(filePath) };
   } catch (err) {
