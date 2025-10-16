@@ -172,3 +172,139 @@ VALUES
 ('Ensalada fresca','Cena',12.00),
 ('Jugo de naranja','Bebida',6.00)
 ON CONFLICT DO NOTHING;
+
+
+
+-- =========================================================
+-- SISTEMA DE CARRITO DE COMPRAS
+-- =========================================================
+
+-- Tabla de carritos
+CREATE TABLE IF NOT EXISTS carritos (
+  id              SERIAL PRIMARY KEY,
+  session_id      TEXT NOT NULL UNIQUE,  -- Identificador de sesión del navegador
+  email_cliente   TEXT,                   -- Opcional hasta el checkout
+  nombre_cliente  TEXT,                   
+  telefono_cliente TEXT,
+  direccion       TEXT,
+  estado          VARCHAR(20) NOT NULL DEFAULT 'activo'
+                  CHECK (estado IN ('activo', 'abandonado', 'convertido')),
+  fecha_creacion  TIMESTAMP NOT NULL DEFAULT NOW(),
+  fecha_actualizacion TIMESTAMP NOT NULL DEFAULT NOW(),
+  fecha_expiracion TIMESTAMP  -- Para limpiar carritos viejos
+);
+
+CREATE INDEX IF NOT EXISTS idx_carritos_session ON carritos (session_id);
+CREATE INDEX IF NOT EXISTS idx_carritos_estado ON carritos (estado);
+
+-- Tabla de items del carrito
+CREATE TABLE IF NOT EXISTS carrito_items (
+  id         SERIAL PRIMARY KEY,
+  carrito_id INTEGER NOT NULL REFERENCES carritos(id) ON DELETE CASCADE,
+  comida_id  INTEGER NOT NULL REFERENCES comidas(id),
+  cantidad   INTEGER NOT NULL CHECK (cantidad > 0),
+  precio_unitario NUMERIC(10,2) NOT NULL CHECK (precio_unitario >= 0),
+  notas      TEXT,  -- Notas específicas del item (ej: "sin cebolla")
+  fecha_agregado TIMESTAMP NOT NULL DEFAULT NOW(),
+  UNIQUE(carrito_id, comida_id)  -- No duplicar items, solo incrementar cantidad
+);
+
+CREATE INDEX IF NOT EXISTS idx_carrito_items_carrito ON carrito_items (carrito_id);
+CREATE INDEX IF NOT EXISTS idx_carrito_items_comida ON carrito_items (comida_id);
+
+-- Tabla de pagos (relaciona carritos con transacciones de Stripe)
+CREATE TABLE IF NOT EXISTS pagos (
+  id                  SERIAL PRIMARY KEY,
+  carrito_id          INTEGER REFERENCES carritos(id),
+  pedido_id           INTEGER REFERENCES pedido(id),  -- Se asigna después de confirmar
+  stripe_payment_intent_id TEXT UNIQUE,
+  stripe_customer_id  TEXT,
+  monto_total         NUMERIC(12,2) NOT NULL CHECK (monto_total >= 0),
+  moneda              VARCHAR(3) NOT NULL DEFAULT 'usd',
+  estado              VARCHAR(30) NOT NULL DEFAULT 'pendiente'
+                      CHECK (estado IN (
+                        'pendiente',       -- PaymentIntent creado
+                        'procesando',      -- En proceso
+                        'exitoso',         -- Pago confirmado
+                        'fallido',         -- Falló
+                        'cancelado',       -- Cancelado por usuario
+                        'reembolsado'      -- Reembolsado
+                      )),
+  metadata            JSONB,  -- Info adicional del pago
+  error_mensaje       TEXT,   -- Si hay error
+  fecha_creacion      TIMESTAMP NOT NULL DEFAULT NOW(),
+  fecha_actualizacion TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_pagos_carrito ON pagos (carrito_id);
+CREATE INDEX IF NOT EXISTS idx_pagos_pedido ON pagos (pedido_id);
+CREATE INDEX IF NOT EXISTS idx_pagos_stripe_pi ON pagos (stripe_payment_intent_id);
+CREATE INDEX IF NOT EXISTS idx_pagos_estado ON pagos (estado);
+
+-- Trigger para actualizar fecha_actualizacion en carritos
+CREATE OR REPLACE FUNCTION update_carrito_timestamp() RETURNS TRIGGER AS $$
+BEGIN
+  NEW.fecha_actualizacion := NOW();
+  RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_carritos_update ON carritos;
+CREATE TRIGGER trg_carritos_update
+BEFORE UPDATE ON carritos
+FOR EACH ROW EXECUTE FUNCTION update_carrito_timestamp();
+
+-- Trigger para actualizar fecha_actualizacion en pagos
+DROP TRIGGER IF EXISTS trg_pagos_update ON pagos;
+CREATE TRIGGER trg_pagos_update
+BEFORE UPDATE ON pagos
+FOR EACH ROW EXECUTE FUNCTION update_carrito_timestamp();
+
+-- =========================================================
+-- VISTA: Carrito con sus items
+-- =========================================================
+CREATE OR REPLACE VIEW vista_carritos_completos AS
+SELECT 
+  c.id,
+  c.session_id,
+  c.email_cliente,
+  c.nombre_cliente,
+  c.telefono_cliente,
+  c.direccion,
+  c.estado,
+  c.fecha_creacion,
+  c.fecha_actualizacion,
+  COUNT(ci.id) as total_items,
+  COALESCE(SUM(ci.cantidad), 0) as total_cantidad,
+  COALESCE(SUM(ci.precio_unitario * ci.cantidad), 0) as total_precio
+FROM carritos c
+LEFT JOIN carrito_items ci ON ci.carrito_id = c.id
+GROUP BY c.id, c.session_id, c.email_cliente, c.nombre_cliente, 
+         c.telefono_cliente, c.direccion, c.estado, 
+         c.fecha_creacion, c.fecha_actualizacion;
+
+-- =========================================================
+-- FUNCIÓN: Limpiar carritos abandonados (más de 7 días)
+-- =========================================================
+CREATE OR REPLACE FUNCTION limpiar_carritos_abandonados() RETURNS INTEGER AS $$
+DECLARE
+  eliminados INTEGER;
+BEGIN
+  DELETE FROM carritos 
+  WHERE estado = 'activo' 
+    AND fecha_actualizacion < NOW() - INTERVAL '7 days';
+  
+  GET DIAGNOSTICS eliminados = ROW_COUNT;
+  RETURN eliminados;
+END; $$ LANGUAGE plpgsql;
+
+-- Ejecutar manualmente: SELECT limpiar_carritos_abandonados();
+
+-- =========================================================
+-- DATOS DE EJEMPLO (opcional)
+-- =========================================================
+-- INSERT INTO carritos (session_id, email_cliente, nombre_cliente)
+-- VALUES ('session_123', 'cliente@example.com', 'Juan Pérez');
+
+COMMENT ON TABLE carritos IS 'Carritos de compra de los usuarios';
+COMMENT ON TABLE carrito_items IS 'Items individuales dentro de cada carrito';
+COMMENT ON TABLE pagos IS 'Registro de pagos procesados con Stripe';  
