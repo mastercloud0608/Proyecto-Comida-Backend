@@ -53,6 +53,8 @@ const comidaRoutes = require('./comida');
 const pedidoRoutes = require('./pedido');
 const categoriaRoutes = require('./categoria');
 const pago = require('./pago');
+const carritoRoutes = require('./carrito');   
+const checkoutRoutes = require('./checkout'); 
 
 /* ============== Healthcheck ============== */
 app.get('/health', (_req, res) => {
@@ -66,6 +68,8 @@ app.use('/auth', authRoutes);
 app.use('/api', comidaRoutes);
 app.use('/api', pedidoRoutes);
 app.use('/api', categoriaRoutes);
+app.use('/api', carritoRoutes); 
+app.use('/api', checkoutRoutes);   
 
 /* ============== Admin: correr migraciones (temporal) ==============
    Añade en Render una var de entorno: INIT_DB_SECRET

@@ -172,6 +172,9 @@ const getProductPrice = async (productId) => {
 const getPublishableKey = () => {
   const key = process.env.STRIPE_PUBLISHABLE_KEY;
   if (!key) {
+    console.warn('⚠️ STRIPE_PUBLISHABLE_KEY no está configurada');
+    // En desarrollo, puedes retornar una key de prueba hardcodeada
+    // return 'pk_test_...'; // Solo para desarrollo
     throw new Error('Falta STRIPE_PUBLISHABLE_KEY en variables de entorno');
   }
   return key;
@@ -191,28 +194,79 @@ const createPaymentIntentDirect = async (amount, currency = 'usd', options = {})
       receipt_email,             // opcional
     } = options;
 
+    // Validación de monto
+    if (!amount || amount <= 0) {
+      throw new Error('El monto debe ser mayor a 0');
+    }
+
     const amountMinor = toMinorUnits(amount, currency, { assumeMinorUnits });
 
-    const paymentIntent = await stripe.paymentIntents.create({
+    // Log para debugging
+    console.log(`💳 Creando PaymentIntent: ${amountMinor} ${currency} (${amount} original)`);
+
+    const paymentIntentParams = {
       amount: amountMinor,
-      currency,
-      customer: customerId,
+      currency: currency.toLowerCase(),
       description,
-      receipt_email,
       metadata: {
         fuente: 'proyecto-comida',
         ...metadata,
       },
-      // Si no pasas payment_method aquí, el frontend lo provee al confirmar.
-      automatic_payment_methods: { enabled: true },
-    });
+      automatic_payment_methods: { 
+        enabled: true,
+        allow_redirects: 'never' // Opcional: evitar métodos que requieran redirección
+      },
+    };
+
+    // Agregar customer si existe
+    if (customerId) {
+      paymentIntentParams.customer = customerId;
+    }
+
+    // Agregar receipt_email si existe
+    if (receipt_email) {
+      paymentIntentParams.receipt_email = receipt_email;
+    }
+
+    const paymentIntent = await stripe.paymentIntents.create(paymentIntentParams);
+
+    console.log(`✅ PaymentIntent creado: ${paymentIntent.id}`);
 
     return {
       id: paymentIntent.id,
       clientSecret: paymentIntent.client_secret,
+      amount: paymentIntent.amount,
+      currency: paymentIntent.currency,
+      status: paymentIntent.status,
     };
   } catch (error) {
-    console.error('Error al crear PaymentIntent (direct):', error);
+    console.error('❌ Error al crear PaymentIntent (direct):', error);
+    throw error;
+  }
+};
+
+/**
+ * Recupera un PaymentIntent por su ID
+ */
+const retrievePaymentIntent = async (paymentIntentId) => {
+  try {
+    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+    return paymentIntent;
+  } catch (error) {
+    console.error('Error al recuperar PaymentIntent:', error);
+    throw error;
+  }
+};
+
+/**
+ * Cancela un PaymentIntent
+ */
+const cancelPaymentIntent = async (paymentIntentId) => {
+  try {
+    const paymentIntent = await stripe.paymentIntents.cancel(paymentIntentId);
+    return paymentIntent;
+  } catch (error) {
+    console.error('Error al cancelar PaymentIntent:', error);
     throw error;
   }
 };
@@ -228,4 +282,8 @@ module.exports = {
   // Nuevos helpers recomendados
   getPublishableKey,
   createPaymentIntentDirect,
+  retrievePaymentIntent,
+  cancelPaymentIntent,
+  // Exportar helper para uso externo si es necesario
+  toMinorUnits,
 };
