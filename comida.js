@@ -1,5 +1,5 @@
 'use strict';
-// comida.js mejorado
+// comida.js mejorado con soporte para imágenes
 const express = require('express');
 const pool = require('./db'); // pg Pool
 const router = express.Router();
@@ -24,6 +24,18 @@ const toPrecio = (v) => {
   return Number.isFinite(n) && n >= 0 ? n : null;
 };
 const isCategoriaValida = (c) => !c || CATEGORIAS_PERMITIDAS.has(c);
+
+// Validar URL de imagen (básico)
+const isValidImageUrl = (url) => {
+  if (!url) return true; // null/vacío es válido
+  try {
+    const parsed = new URL(url);
+    return ['http:', 'https:'].includes(parsed.protocol);
+  } catch {
+    return false;
+  }
+};
+
 const mapPrecioNumber = (row) =>
   row ? { ...row, precio: row.precio !== null ? Number(row.precio) : null } : row;
 
@@ -78,9 +90,9 @@ router.get('/comidas', asyncHandler(async (req, res) => {
     where.push(`nombre ILIKE $${params.length}`);
   }
 
-  // Nota: usamos COUNT(*) OVER() para traer total sin segunda consulta
+  // Incluimos el campo imagen en el SELECT
   let sql = `
-    SELECT id, nombre, categoria, precio,
+    SELECT id, nombre, categoria, precio, imagen,
            COUNT(*) OVER() AS total
     FROM comidas
   `;
@@ -106,7 +118,7 @@ router.get('/comidas/:id', asyncHandler(async (req, res) => {
   if (id === null) return badRequest(res, 'ID inválido');
 
   const { rows } = await pool.query(
-    'SELECT id, nombre, categoria, precio FROM comidas WHERE id = $1',
+    'SELECT id, nombre, categoria, precio, imagen FROM comidas WHERE id = $1',
     [id]
   );
   if (rows.length === 0) return res.status(404).json({ mensaje: 'Comida no encontrada' });
@@ -116,12 +128,13 @@ router.get('/comidas/:id', asyncHandler(async (req, res) => {
 
 /**
  * POST /api/comidas
- * Body: { nombre, categoria?, precio }
+ * Body: { nombre, categoria?, precio, imagen? }
  */
 router.post('/comidas', asyncHandler(async (req, res) => {
   const nombre = norm(req.body?.nombre);
   const categoria = norm(req.body?.categoria);
   const precio = toPrecio(req.body?.precio);
+  const imagen = norm(req.body?.imagen);
 
   if (!nombre || nombre.length > 120) {
     return badRequest(res, 'El nombre es requerido y debe tener ≤ 120 caracteres');
@@ -132,12 +145,15 @@ router.post('/comidas', asyncHandler(async (req, res) => {
   if (!isCategoriaValida(categoria)) {
     return badRequest(res, 'Categoría inválida');
   }
+  if (imagen && !isValidImageUrl(imagen)) {
+    return badRequest(res, 'La URL de la imagen no es válida');
+  }
 
   const { rows } = await pool.query(
-    `INSERT INTO comidas (nombre, categoria, precio)
-     VALUES ($1, $2, $3)
-     RETURNING id, nombre, categoria, precio`,
-    [nombre, categoria || null, precio]
+    `INSERT INTO comidas (nombre, categoria, precio, imagen)
+     VALUES ($1, $2, $3, $4)
+     RETURNING id, nombre, categoria, precio, imagen`,
+    [nombre, categoria || null, precio, imagen || null]
   );
 
   const created = mapPrecioNumber(rows[0]);
@@ -149,7 +165,7 @@ router.post('/comidas', asyncHandler(async (req, res) => {
 
 /**
  * PUT /api/comidas/:id   (reemplazo completo)
- * Body: { nombre, categoria?, precio }
+ * Body: { nombre, categoria?, precio, imagen? }
  */
 router.put('/comidas/:id', asyncHandler(async (req, res) => {
   const id = toIntPos(req.params.id);
@@ -158,6 +174,7 @@ router.put('/comidas/:id', asyncHandler(async (req, res) => {
   const nombre = norm(req.body?.nombre);
   const categoria = norm(req.body?.categoria);
   const precio = toPrecio(req.body?.precio);
+  const imagen = norm(req.body?.imagen);
 
   if (!nombre || nombre.length > 120) {
     return badRequest(res, 'El nombre es requerido y debe tener ≤ 120 caracteres');
@@ -168,13 +185,16 @@ router.put('/comidas/:id', asyncHandler(async (req, res) => {
   if (!isCategoriaValida(categoria)) {
     return badRequest(res, 'Categoría inválida');
   }
+  if (imagen && !isValidImageUrl(imagen)) {
+    return badRequest(res, 'La URL de la imagen no es válida');
+  }
 
   const { rows } = await pool.query(
     `UPDATE comidas
-       SET nombre = $1, categoria = $2, precio = $3
-     WHERE id = $4
-     RETURNING id, nombre, categoria, precio`,
-    [nombre, categoria || null, precio, id]
+       SET nombre = $1, categoria = $2, precio = $3, imagen = $4
+     WHERE id = $5
+     RETURNING id, nombre, categoria, precio, imagen`,
+    [nombre, categoria || null, precio, imagen || null, id]
   );
 
   if (rows.length === 0) return res.status(404).json({ mensaje: 'Comida no encontrada' });
@@ -183,7 +203,7 @@ router.put('/comidas/:id', asyncHandler(async (req, res) => {
 
 /**
  * PATCH /api/comidas/:id   (actualización parcial)
- * Body: { nombre?, categoria?, precio? }
+ * Body: { nombre?, categoria?, precio?, imagen? }
  */
 router.patch('/comidas/:id', asyncHandler(async (req, res) => {
   const id = toIntPos(req.params.id);
@@ -192,6 +212,7 @@ router.patch('/comidas/:id', asyncHandler(async (req, res) => {
   const nombre = req.body?.nombre !== undefined ? norm(req.body.nombre) : undefined;
   const categoria = req.body?.categoria !== undefined ? norm(req.body.categoria) : undefined;
   const precio = req.body?.precio !== undefined ? toPrecio(req.body.precio) : undefined;
+  const imagen = req.body?.imagen !== undefined ? norm(req.body.imagen) : undefined;
 
   const sets = [];
   const params = [];
@@ -207,13 +228,17 @@ router.patch('/comidas/:id', asyncHandler(async (req, res) => {
     if (precio === null) return badRequest(res, 'Precio inválido');
     params.push(precio); sets.push(`precio = $${params.length}`);
   }
+  if (imagen !== undefined) {
+    if (imagen && !isValidImageUrl(imagen)) return badRequest(res, 'URL de imagen inválida');
+    params.push(imagen || null); sets.push(`imagen = $${params.length}`);
+  }
 
   if (sets.length === 0) return badRequest(res, 'No hay campos para actualizar');
 
   params.push(id);
   const { rows } = await pool.query(
     `UPDATE comidas SET ${sets.join(', ')} WHERE id = $${params.length}
-     RETURNING id, nombre, categoria, precio`,
+     RETURNING id, nombre, categoria, precio, imagen`,
     params
   );
   if (rows.length === 0) return res.status(404).json({ mensaje: 'Comida no encontrada' });
@@ -237,8 +262,6 @@ router.delete('/comidas/:id', asyncHandler(async (req, res) => {
 }));
 
 /* =================== Manejador de errores =================== */
-// Debe ir al final del router si lo montas directamente en app.use('/api', router)
-// Si ya tienes un error handler global, puedes omitir este.
 router.use((err, req, res, _next) => {
   console.error('Error:', err);
   res.status(500).json({ mensaje: 'Error interno del servidor', error: err.message });
