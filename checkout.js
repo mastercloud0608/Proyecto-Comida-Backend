@@ -3,22 +3,12 @@ const express = require('express');
 const pool = require('./db');
 const router = express.Router();
 
-// Importar helpers de Stripe
-const {
-  createPaymentIntentDirect,
-  getPublishableKey
-} = require('./pago');
-
+// Inicializar Stripe con la clave secreta
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 /* ============================================
  * UTILIDADES
  * ============================================ */
-const toInt = (v) => {
-  const n = Number(v);
-  return Number.isInteger(n) ? n : null;
-};
-
 const getSessionId = (req) => {
   return req.headers['x-session-id'];
 };
@@ -29,9 +19,19 @@ const getSessionId = (req) => {
  * ============================================ */
 router.get('/checkout/config', (req, res) => {
   try {
-    const publishableKey = getPublishableKey();
+    const publishableKey = process.env.STRIPE_PUBLISHABLE_KEY;
+    
+    if (!publishableKey) {
+      console.error('❌ STRIPE_PUBLISHABLE_KEY no está configurada');
+      return res.status(500).json({ 
+        mensaje: 'Configuración de Stripe no disponible' 
+      });
+    }
+    
+    console.log('✅ Enviando publishable key:', publishableKey.substring(0, 20) + '...');
     res.json({ publishableKey });
   } catch (error) {
+    console.error('Error en /checkout/config:', error);
     res.status(500).json({ 
       mensaje: 'Error al obtener configuración', 
       error: error.message 
@@ -45,6 +45,9 @@ router.get('/checkout/config', (req, res) => {
  * ============================================ */
 router.post('/checkout/create-payment-intent', async (req, res) => {
   const sessionId = getSessionId(req);
+  
+  console.log('📥 Recibida petición create-payment-intent');
+  console.log('📍 Session ID:', sessionId);
   
   if (!sessionId) {
     return res.status(400).json({ mensaje: 'Session ID requerido' });
@@ -62,10 +65,12 @@ router.post('/checkout/create-payment-intent', async (req, res) => {
     
     if (carritoResult.rows.length === 0) {
       await client.query('ROLLBACK');
+      console.log('❌ Carrito no encontrado para session:', sessionId);
       return res.status(404).json({ mensaje: 'Carrito no encontrado' });
     }
     
     const carrito = carritoResult.rows[0];
+    console.log('✅ Carrito encontrado:', carrito.id);
     
     // Validar que el carrito tiene información del cliente
     if (!carrito.nombre_cliente || !carrito.email_cliente) {
@@ -89,30 +94,53 @@ router.post('/checkout/create-payment-intent', async (req, res) => {
       return res.status(400).json({ mensaje: 'El carrito está vacío' });
     }
     
+    console.log('📦 Items en el carrito:', itemsResult.rows.length);
+    
     // Calcular total
     const total = itemsResult.rows.reduce((sum, item) => {
       return sum + (parseFloat(item.precio_unitario) * parseInt(item.cantidad));
     }, 0);
+    
+    console.log('💰 Total calculado:', total);
     
     if (total <= 0) {
       await client.query('ROLLBACK');
       return res.status(400).json({ mensaje: 'El total debe ser mayor a 0' });
     }
     
+    // Convertir a centavos (Stripe trabaja en centavos)
+    const amountInCents = Math.round(total * 100);
+    
+    // Validar monto mínimo de Stripe (50 centavos = 0.50)
+    if (amountInCents < 50) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ 
+        mensaje: 'El monto mínimo es 0.50 USD' 
+      });
+    }
+    
+    console.log('💳 Creando Payment Intent en Stripe...');
+    console.log('   - Monto en centavos:', amountInCents);
+    console.log('   - Moneda: usd');
+    
     // Crear Payment Intent en Stripe
-    const paymentIntentData = await createPaymentIntentDirect(
-      total,
-      'usd', // Puedes cambiar a 'bob' si tu cuenta lo soporta
-      {
-        description: `Pedido de ${carrito.nombre_cliente}`,
-        receipt_email: carrito.email_cliente,
-        metadata: {
-          carrito_id: carrito.id.toString(),
-          session_id: sessionId,
-          items_count: itemsResult.rows.length.toString()
-        }
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: amountInCents,
+      currency: 'usd', // Cambiar a 'bob' si tu cuenta Stripe lo soporta
+      automatic_payment_methods: {
+        enabled: true,
+      },
+      description: `Pedido de ${carrito.nombre_cliente}`,
+      receipt_email: carrito.email_cliente,
+      metadata: {
+        carrito_id: carrito.id.toString(),
+        session_id: sessionId,
+        items_count: itemsResult.rows.length.toString(),
+        customer_name: carrito.nombre_cliente
       }
-    );
+    });
+    
+    console.log('✅ Payment Intent creado:', paymentIntent.id);
     
     // Registrar el pago en la BD
     const pagoResult = await client.query(
@@ -127,7 +155,7 @@ router.post('/checkout/create-payment-intent', async (req, res) => {
       RETURNING id`,
       [
         carrito.id,
-        paymentIntentData.id,
+        paymentIntent.id,
         total,
         'usd',
         'pendiente',
@@ -142,20 +170,25 @@ router.post('/checkout/create-payment-intent', async (req, res) => {
       ]
     );
     
+    console.log('✅ Pago registrado en BD:', pagoResult.rows[0].id);
+    
     await client.query('COMMIT');
     
     res.json({
-      clientSecret: paymentIntentData.clientSecret,
-      paymentIntentId: paymentIntentData.id,
+      clientSecret: paymentIntent.client_secret,
+      paymentIntentId: paymentIntent.id,
       pagoId: pagoResult.rows[0].id,
       amount: total
     });
   } catch (error) {
     await client.query('ROLLBACK');
-    console.error('POST /create-payment-intent error:', error);
+    console.error('❌ Error en create-payment-intent:', error);
+    console.error('   Stack:', error.stack);
+    
     res.status(500).json({ 
       mensaje: 'Error al crear payment intent', 
-      error: error.message 
+      error: error.message,
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   } finally {
     client.release();
@@ -169,6 +202,11 @@ router.post('/checkout/create-payment-intent', async (req, res) => {
  * ============================================ */
 router.post('/checkout/confirm', async (req, res) => {
   const { paymentIntentId } = req.body;
+  const sessionId = getSessionId(req);
+  
+  console.log('📥 Recibida petición confirm');
+  console.log('📍 Payment Intent ID:', paymentIntentId);
+  console.log('📍 Session ID:', sessionId);
   
   if (!paymentIntentId) {
     return res.status(400).json({ mensaje: 'paymentIntentId requerido' });
@@ -179,7 +217,9 @@ router.post('/checkout/confirm', async (req, res) => {
     await client.query('BEGIN');
     
     // Verificar el Payment Intent en Stripe
+    console.log('🔍 Verificando Payment Intent en Stripe...');
     const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+    console.log('   Estado:', paymentIntent.status);
     
     if (paymentIntent.status !== 'succeeded') {
       await client.query('ROLLBACK');
@@ -197,14 +237,16 @@ router.post('/checkout/confirm', async (req, res) => {
     
     if (pagoResult.rows.length === 0) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ mensaje: 'Pago no encontrado' });
+      return res.status(404).json({ mensaje: 'Pago no encontrado en la base de datos' });
     }
     
     const pago = pagoResult.rows[0];
+    console.log('✅ Pago encontrado en BD:', pago.id);
     
     // Si ya se procesó, devolver el pedido existente
     if (pago.pedido_id) {
       await client.query('ROLLBACK');
+      console.log('ℹ️ Pago ya procesado anteriormente');
       return res.json({ 
         mensaje: 'Pago ya procesado',
         pedido_id: pago.pedido_id
@@ -226,6 +268,8 @@ router.post('/checkout/confirm', async (req, res) => {
        WHERE ci.carrito_id = $1`,
       [carrito.id]
     );
+    
+    console.log('📦 Creando pedidos para', itemsResult.rows.length, 'items...');
     
     // Crear pedidos individuales por cada item
     const pedidosCreados = [];
@@ -258,9 +302,10 @@ router.post('/checkout/confirm', async (req, res) => {
       );
       
       pedidosCreados.push(pedidoResult.rows[0].id);
+      console.log('   ✅ Pedido creado:', pedidoResult.rows[0].id);
     }
     
-    // Actualizar pago con el primer pedido_id (o crear una relación multiple si prefieres)
+    // Actualizar pago con el primer pedido_id
     await client.query(
       `UPDATE pagos 
        SET estado = $1, 
@@ -276,6 +321,8 @@ router.post('/checkout/confirm', async (req, res) => {
       ['convertido', carrito.id]
     );
     
+    console.log('✅ Proceso completado exitosamente');
+    
     await client.query('COMMIT');
     res.json({
       mensaje: 'Pago confirmado y pedido(s) creado(s)',
@@ -284,10 +331,13 @@ router.post('/checkout/confirm', async (req, res) => {
     });
   } catch (error) {
     await client.query('ROLLBACK');
-    console.error('POST /checkout/confirm error:', error);
+    console.error('❌ Error en confirm:', error);
+    console.error('   Stack:', error.stack);
+    
     res.status(500).json({ 
       mensaje: 'Error al confirmar el pago', 
-      error: error.message 
+      error: error.message,
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   } finally {
     client.release();
@@ -302,6 +352,8 @@ router.get('/checkout/payment-status/:paymentIntentId', async (req, res) => {
   const { paymentIntentId } = req.params;
   
   try {
+    console.log('🔍 Verificando estado de pago:', paymentIntentId);
+    
     // Verificar en Stripe
     const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
     
@@ -325,7 +377,7 @@ router.get('/checkout/payment-status/:paymentIntentId', async (req, res) => {
       moneda: pago.moneda
     });
   } catch (error) {
-    console.error('GET /payment-status error:', error);
+    console.error('❌ Error en payment-status:', error);
     res.status(500).json({ 
       mensaje: 'Error al verificar estado del pago', 
       error: error.message 
