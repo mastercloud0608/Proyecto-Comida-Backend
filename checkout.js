@@ -165,60 +165,6 @@ router.post('/checkout/create-payment-intent', async (req, res) => {
   }
 });
 
-    console.log('✅ Payment Intent creado:', paymentIntent.id);
-    
-    // Registrar el pago en la BD
-    const pagoResult = await client.query(
-      `INSERT INTO pagos (
-        carrito_id, 
-        stripe_payment_intent_id, 
-        monto_total, 
-        moneda, 
-        estado,
-        metadata
-      ) VALUES ($1, $2, $3, $4, $5, $6)
-      RETURNING id`,
-      [
-        carrito.id,
-        paymentIntent.id,
-        total,
-        'usd',
-        'pendiente',
-        JSON.stringify({
-          items: itemsResult.rows.map(i => ({
-            comida_id: i.comida_id,
-            nombre: i.nombre,
-            cantidad: i.cantidad,
-            precio_unitario: i.precio_unitario
-          }))
-        })
-      ]
-    );
-    
-    console.log('✅ Pago registrado en BD:', pagoResult.rows[0].id);
-    
-    await client.query('COMMIT');
-    
-    res.json({
-      clientSecret: paymentIntent.client_secret,
-      paymentIntentId: paymentIntent.id,
-      pagoId: pagoResult.rows[0].id,
-      amount: total
-    });
-  } catch (error) {
-    await client.query('ROLLBACK');
-    console.error('❌ Error en create-payment-intent:', error);
-    console.error('   Stack:', error.stack);
-    
-    res.status(500).json({ 
-      mensaje: 'Error al crear payment intent', 
-      error: error.message,
-      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
-    });
-  } finally {
-    client.release();
-  }
-});
 
 /* ============================================
  * POST /api/checkout/confirm
