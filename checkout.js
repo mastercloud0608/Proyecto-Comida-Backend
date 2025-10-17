@@ -43,43 +43,44 @@ router.get('/checkout/config', (req, res) => {
  * POST /api/checkout/create-payment-intent
  * Crear un Payment Intent para el carrito actual
  * ============================================ */
+// Crear Payment Intent (Stripe Elements)
 router.post('/checkout/create-payment-intent', async (req, res) => {
   const sessionId = getSessionId(req);
-  
+
   console.log('📥 Recibida petición create-payment-intent');
   console.log('📍 Session ID:', sessionId);
-  
+
   if (!sessionId) {
     return res.status(400).json({ mensaje: 'Session ID requerido' });
   }
-  
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    
-    // Obtener carrito
+
+    // Buscar carrito activo
     const carritoResult = await client.query(
       'SELECT * FROM carritos WHERE session_id = $1 AND estado = $2',
       [sessionId, 'activo']
     );
-    
+
     if (carritoResult.rows.length === 0) {
       await client.query('ROLLBACK');
       console.log('❌ Carrito no encontrado para session:', sessionId);
       return res.status(404).json({ mensaje: 'Carrito no encontrado' });
     }
-    
+
     const carrito = carritoResult.rows[0];
     console.log('✅ Carrito encontrado:', carrito.id);
-    
-    // Validar que el carrito tiene información del cliente
+
+    // Validar info del cliente
     if (!carrito.nombre_cliente || !carrito.email_cliente) {
       await client.query('ROLLBACK');
-      return res.status(400).json({ 
-        mensaje: 'Debe proporcionar información del cliente antes de proceder al pago' 
+      return res.status(400).json({
+        mensaje: 'Debe proporcionar información del cliente antes de proceder al pago',
       });
     }
-    
+
     // Obtener items del carrito
     const itemsResult = await client.query(
       `SELECT ci.*, c.nombre, c.precio
@@ -88,57 +89,82 @@ router.post('/checkout/create-payment-intent', async (req, res) => {
        WHERE ci.carrito_id = $1`,
       [carrito.id]
     );
-    
+
     if (itemsResult.rows.length === 0) {
       await client.query('ROLLBACK');
       return res.status(400).json({ mensaje: 'El carrito está vacío' });
     }
-    
+
     console.log('📦 Items en el carrito:', itemsResult.rows.length);
-    
+
     // Calcular total
     const total = itemsResult.rows.reduce((sum, item) => {
-      return sum + (parseFloat(item.precio_unitario) * parseInt(item.cantidad));
+      return sum + parseFloat(item.precio_unitario) * parseInt(item.cantidad);
     }, 0);
-    
+
     console.log('💰 Total calculado:', total);
-    
+
     if (total <= 0) {
       await client.query('ROLLBACK');
       return res.status(400).json({ mensaje: 'El total debe ser mayor a 0' });
     }
-    
-    // Convertir a centavos (Stripe trabaja en centavos)
+
+    // Convertir a centavos
     const amountInCents = Math.round(total * 100);
-    
-    // Validar monto mínimo de Stripe (50 centavos = 0.50)
+
     if (amountInCents < 50) {
       await client.query('ROLLBACK');
-      return res.status(400).json({ 
-        mensaje: 'El monto mínimo es 0.50 USD' 
-      });
+      return res.status(400).json({ mensaje: 'El monto mínimo es 0.50 USD' });
     }
-    
+
     console.log('💳 Creando Payment Intent en Stripe...');
     console.log('   - Monto en centavos:', amountInCents);
     console.log('   - Moneda: usd');
-    
-    // Crear Payment Intent en Stripe
-   const paymentIntent = await stripe.paymentIntents.create({
-  amount: amountInCents,
-  currency: 'usd', // o 'bob' si tu cuenta Stripe lo soporta
-  payment_method_types: ['card'], // 👈 fuerza solo tarjeta (evita error 400)
-  description: `Pedido de ${carrito.nombre_cliente}`,
-  receipt_email: carrito.email_cliente,
-  metadata: {
-    carrito_id: carrito.id.toString(),
-    session_id: sessionId,
-    items_count: itemsResult.rows.length.toString(),
-    customer_name: carrito.nombre_cliente
+
+    // ✅ Crear PaymentIntent SOLO con tarjeta (sin métodos automáticos)
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: amountInCents,
+      currency: 'usd',
+      payment_method_types: ['card'], // evita error 400
+      description: `Pedido de ${carrito.nombre_cliente}`,
+      receipt_email: carrito.email_cliente,
+      metadata: {
+        carrito_id: carrito.id.toString(),
+        session_id: sessionId,
+        items_count: itemsResult.rows.length.toString(),
+        customer_name: carrito.nombre_cliente,
+      },
+    });
+
+    console.log('✅ Payment Intent creado:', paymentIntent.id);
+
+    // Registrar el pago en la BD (opcional)
+    await client.query(
+      `INSERT INTO pagos (carrito_id, payment_intent_id, monto, estado)
+       VALUES ($1, $2, $3, $4)`,
+      [carrito.id, paymentIntent.id, total, 'pendiente']
+    );
+
+    await client.query('COMMIT');
+
+    // 🔁 Responder al frontend
+    return res.json({
+      clientSecret: paymentIntent.client_secret,
+      amount: paymentIntent.amount,
+      currency: paymentIntent.currency,
+    });
+  } catch (error) {
+    console.error('❌ Error al crear Payment Intent:', error);
+    await client.query('ROLLBACK');
+    return res.status(500).json({
+      mensaje: 'Error al crear el pago en Stripe',
+      error: error.message,
+    });
+  } finally {
+    client.release();
   }
 });
 
-    
     console.log('✅ Payment Intent creado:', paymentIntent.id);
     
     // Registrar el pago en la BD
