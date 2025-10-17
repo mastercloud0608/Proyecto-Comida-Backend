@@ -101,24 +101,42 @@ const addPaymentMethodToUser = async (customerId, paymentMethodId, { setAsDefaul
  * Útil si sigues usando token + payment_method en el servidor.
  * Si quieres confirmar en el FRONT con Elements, usa createPaymentIntentDirect() y confirma allí.
  */
-const createPayment = async (customerId, paymentMethodId, productId, amount, currency = 'usd', options = {}) => {
+/**
+ * Crea y CONFIRMA un Payment Intent en el backend (flujo "server-side confirmation").
+ * Útil si sigues usando token + payment_method en el servidor.
+ * Si quieres confirmar en el FRONT con Elements, usa createPaymentIntentDirect().
+ */
+const createPayment = async (
+  customerId,
+  paymentMethodId,
+  productId,
+  amount,
+  currency = 'usd',
+  options = {}
+) => {
   try {
     const {
       assumeMinorUnits = false,           // si true, "amount" ya viene en centavos
-      description = productId ? `Pago de producto ${productId}` : 'Pago Proyecto Comida',
+      description = productId
+        ? `Pago de producto ${productId}`
+        : 'Pago Proyecto Comida',
       metadata = {},
       receipt_email,
     } = options;
 
+    // Validar y convertir el monto
     const amountMinor = toMinorUnits(amount, currency, { assumeMinorUnits });
 
+    console.log(`💳 Creando y confirmando PaymentIntent para ${amountMinor} ${currency}`);
+
+    // Crear PaymentIntent en Stripe
     const paymentIntent = await stripe.paymentIntents.create({
       amount: amountMinor,
-      currency,
+      currency: currency.toLowerCase(),
       customer: customerId,
       payment_method: paymentMethodId,
       confirm: true, // confirmación inmediata en backend
-      payment_method_types: ['card'],
+      payment_method_types: ['card'], // ✅ solo tarjetas, evita errores 400
       description,
       receipt_email,
       metadata: {
@@ -128,10 +146,11 @@ const createPayment = async (customerId, paymentMethodId, productId, amount, cur
       },
     });
 
+    console.log(`✅ PaymentIntent creado y confirmado: ${paymentIntent.id} (${paymentIntent.status})`);
     return paymentIntent;
   } catch (error) {
-    // Errores de tarjeta vienen con type = 'StripeCardError', etc.
-    console.error('Error al crear/confirmar PaymentIntent:', error);
+    // Errores de tarjeta o validación de Stripe
+    console.error('❌ Error al crear/confirmar PaymentIntent:', error);
     throw error;
   }
 };
