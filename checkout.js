@@ -124,21 +124,20 @@ router.post('/checkout/create-payment-intent', async (req, res) => {
     console.log('   - Moneda: usd');
     
     // Crear Payment Intent en Stripe
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: amountInCents,
-      currency: 'usd', // Cambiar a 'bob' si tu cuenta Stripe lo soporta
-      automatic_payment_methods: {
-        enabled: true,
-      },
-      description: `Pedido de ${carrito.nombre_cliente}`,
-      receipt_email: carrito.email_cliente,
-      metadata: {
-        carrito_id: carrito.id.toString(),
-        session_id: sessionId,
-        items_count: itemsResult.rows.length.toString(),
-        customer_name: carrito.nombre_cliente
-      }
-    });
+   const paymentIntent = await stripe.paymentIntents.create({
+  amount: amountInCents,
+  currency: 'usd', // o 'bob' si tu cuenta Stripe lo soporta
+  payment_method_types: ['card'], // 👈 fuerza solo tarjeta (evita error 400)
+  description: `Pedido de ${carrito.nombre_cliente}`,
+  receipt_email: carrito.email_cliente,
+  metadata: {
+    carrito_id: carrito.id.toString(),
+    session_id: sessionId,
+    items_count: itemsResult.rows.length.toString(),
+    customer_name: carrito.nombre_cliente
+  }
+});
+
     
     console.log('✅ Payment Intent creado:', paymentIntent.id);
     
