@@ -1,13 +1,71 @@
-// checkout.js - Router para procesar pagos con Stripe
+// checkout.js - Router para procesar pagos con Stripe, Efectivo y QR
 const express = require('express');
 const pool = require('./db');
 const router = express.Router();
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
+// ===== Verificación de entorno Stripe =====
+console.log('🔑 Verificando claves Stripe...');
+if (!process.env.STRIPE_SECRET_KEY) {
+  console.error('❌ STRIPE_SECRET_KEY no está configurada en Render');
+} else {
+  console.log(
+    '✅ STRIPE_SECRET_KEY cargada correctamente:',
+    process.env.STRIPE_SECRET_KEY.startsWith('sk_live_') ? 'LIVE' : 'TEST'
+  );
+}
+if (!process.env.STRIPE_PUBLISHABLE_KEY) {
+  console.error('⚠️ STRIPE_PUBLISHABLE_KEY no configurada');
+} else {
+  console.log(
+    '📣 STRIPE_PUBLISHABLE_KEY:',
+    process.env.STRIPE_PUBLISHABLE_KEY.substring(0, 20) + '...'
+  );
+}
+
 /* ============================================
  * UTILIDAD: obtener sessionId del header
  * ============================================ */
 const getSessionId = (req) => req.headers['x-session-id'];
+
+/* ============================================
+ * UTILIDAD: crear pedidos desde carrito
+ * ============================================ */
+async function crearPedidosDesdeCarrito(client, carrito, metodoPago, estadoInicial = 'confirmado') {
+  const itemsResult = await client.query(
+    `SELECT ci.*, c.nombre
+     FROM carrito_items ci
+     JOIN comidas c ON c.id = ci.comida_id
+     WHERE ci.carrito_id = $1`,
+    [carrito.id]
+  );
+
+  const pedidosCreados = [];
+  for (const item of itemsResult.rows) {
+    const pedidoResult = await client.query(
+      `INSERT INTO pedido (
+        comida_id, nombre_cliente, email_cliente, telefono_cliente, direccion,
+        cantidad, precio_total, estado, notas, metodo_pago
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+      RETURNING id`,
+      [
+        item.comida_id,
+        carrito.nombre_cliente,
+        carrito.email_cliente,
+        carrito.telefono_cliente,
+        carrito.direccion,
+        item.cantidad,
+        parseFloat(item.precio_unitario) * parseInt(item.cantidad),
+        estadoInicial,
+        item.notas,
+        metodoPago
+      ]
+    );
+    pedidosCreados.push(pedidoResult.rows[0].id);
+  }
+
+  return pedidosCreados;
+}
 
 /* ============================================
  * GET /api/checkout/config
@@ -78,11 +136,12 @@ router.post('/checkout/create-payment-intent', async (req, res) => {
       return res.status(400).json({ mensaje: 'El carrito está vacío' });
     }
 
-    // Calcular total
+    // Calcular total correctamente
     const total = itemsResult.rows.reduce(
-      (sum, item) => sum + parseFloat(item.precio_unitario) * parseInt(item.cantidad),
+      (sum, item) => sum + parseFloat(item.precio || item.precio_unitario || 0) * parseInt(item.cantidad),
       0
     );
+    console.log('🧮 Total calculado:', total);
 
     if (isNaN(total) || total <= 0) {
       await client.query('ROLLBACK');
@@ -109,7 +168,7 @@ router.post('/checkout/create-payment-intent', async (req, res) => {
 
     console.log('✅ PaymentIntent creado:', paymentIntent.id);
 
-    // Registrar en la tabla PAGOS con las columnas correctas
+    // Registrar en la tabla PAGOS
     await client.query(
       `INSERT INTO pagos (
         carrito_id,
@@ -197,36 +256,7 @@ router.post('/checkout/confirm', async (req, res) => {
     );
     const carrito = carritoResult.rows[0];
 
-    const itemsResult = await client.query(
-      `SELECT ci.*, c.nombre
-       FROM carrito_items ci
-       JOIN comidas c ON c.id = ci.comida_id
-       WHERE ci.carrito_id = $1`,
-      [carrito.id]
-    );
-
-    const pedidosCreados = [];
-    for (const item of itemsResult.rows) {
-      const pedidoResult = await client.query(
-        `INSERT INTO pedido (
-          comida_id, nombre_cliente, email_cliente, telefono_cliente, direccion,
-          cantidad, precio_total, estado, notas
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-        RETURNING id`,
-        [
-          item.comida_id,
-          carrito.nombre_cliente,
-          carrito.email_cliente,
-          carrito.telefono_cliente,
-          carrito.direccion,
-          item.cantidad,
-          parseFloat(item.precio_unitario) * parseInt(item.cantidad),
-          'confirmado',
-          item.notas,
-        ]
-      );
-      pedidosCreados.push(pedidoResult.rows[0].id);
-    }
+    const pedidosCreados = await crearPedidosDesdeCarrito(client, carrito, 'tarjeta');
 
     await client.query(
       `UPDATE pagos 
@@ -251,6 +281,232 @@ router.post('/checkout/confirm', async (req, res) => {
     await client.query('ROLLBACK');
     console.error('❌ Error en confirm:', error);
     res.status(500).json({ mensaje: 'Error al confirmar el pago', error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+/* ============================================
+ * POST /api/checkout/confirm-efectivo
+ * Confirma pedido con pago en efectivo
+ * ============================================ */
+router.post('/checkout/confirm-efectivo', async (req, res) => {
+  const sessionId = getSessionId(req);
+  console.log('💵 Recibida petición confirm-efectivo');
+  console.log('📍 Session ID:', sessionId);
+
+  if (!sessionId)
+    return res.status(400).json({ mensaje: 'Session ID requerido' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Obtener carrito activo
+    const carritoResult = await client.query(
+      'SELECT * FROM carritos WHERE session_id = $1 AND estado = $2',
+      [sessionId, 'activo']
+    );
+
+    if (carritoResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ mensaje: 'Carrito no encontrado' });
+    }
+
+    const carrito = carritoResult.rows[0];
+
+    if (!carrito.nombre_cliente || !carrito.email_cliente) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        mensaje: 'Debe proporcionar información del cliente',
+      });
+    }
+
+    // Verificar items
+    const itemsResult = await client.query(
+      `SELECT ci.*, c.precio
+       FROM carrito_items ci
+       JOIN comidas c ON c.id = ci.comida_id
+       WHERE ci.carrito_id = $1`,
+      [carrito.id]
+    );
+
+    if (itemsResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ mensaje: 'El carrito está vacío' });
+    }
+
+    // Calcular total
+    const total = itemsResult.rows.reduce(
+      (sum, item) => sum + parseFloat(item.precio || item.precio_unitario || 0) * parseInt(item.cantidad),
+      0
+    );
+
+    // Crear pedidos con estado 'pendiente_pago'
+    const pedidosCreados = await crearPedidosDesdeCarrito(
+      client, 
+      carrito, 
+      'efectivo', 
+      'pendiente_pago'
+    );
+
+    // Registrar el pago como pendiente
+    await client.query(
+      `INSERT INTO pagos (
+        carrito_id,
+        monto_total,
+        moneda,
+        estado,
+        pedido_id,
+        metadata
+      ) VALUES ($1, $2, $3, $4, $5, $6)`,
+      [
+        carrito.id,
+        total,
+        'bob', // Bolivianos
+        'pendiente',
+        pedidosCreados[0],
+        JSON.stringify({
+          metodo_pago: 'efectivo',
+          items: itemsResult.rows.map(i => ({
+            comida_id: i.comida_id,
+            cantidad: i.cantidad,
+            precio_unitario: i.precio_unitario
+          }))
+        })
+      ]
+    );
+
+    await client.query(
+      'UPDATE carritos SET estado = $1 WHERE id = $2',
+      ['convertido', carrito.id]
+    );
+
+    await client.query('COMMIT');
+
+    res.json({
+      mensaje: 'Pedido confirmado. Paga en efectivo al recibir tu pedido.',
+      pedidos: pedidosCreados,
+      monto_total: total,
+      metodo_pago: 'efectivo'
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('❌ Error en confirm-efectivo:', error);
+    res.status(500).json({ mensaje: 'Error al confirmar pedido', error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+/* ============================================
+ * POST /api/checkout/confirm-qr
+ * Confirma pedido con pago QR
+ * ============================================ */
+router.post('/checkout/confirm-qr', async (req, res) => {
+  const sessionId = getSessionId(req);
+  console.log('📱 Recibida petición confirm-qr');
+  console.log('📍 Session ID:', sessionId);
+
+  if (!sessionId)
+    return res.status(400).json({ mensaje: 'Session ID requerido' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Obtener carrito activo
+    const carritoResult = await client.query(
+      'SELECT * FROM carritos WHERE session_id = $1 AND estado = $2',
+      [sessionId, 'activo']
+    );
+
+    if (carritoResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ mensaje: 'Carrito no encontrado' });
+    }
+
+    const carrito = carritoResult.rows[0];
+
+    if (!carrito.nombre_cliente || !carrito.email_cliente) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        mensaje: 'Debe proporcionar información del cliente',
+      });
+    }
+
+    // Verificar items
+    const itemsResult = await client.query(
+      `SELECT ci.*, c.precio
+       FROM carrito_items ci
+       JOIN comidas c ON c.id = ci.comida_id
+       WHERE ci.carrito_id = $1`,
+      [carrito.id]
+    );
+
+    if (itemsResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ mensaje: 'El carrito está vacío' });
+    }
+
+    // Calcular total
+    const total = itemsResult.rows.reduce(
+      (sum, item) => sum + parseFloat(item.precio || item.precio_unitario || 0) * parseInt(item.cantidad),
+      0
+    );
+
+    // Crear pedidos con estado 'pendiente_verificacion'
+    const pedidosCreados = await crearPedidosDesdeCarrito(
+      client, 
+      carrito, 
+      'qr', 
+      'pendiente_verificacion'
+    );
+
+    // Registrar el pago como pendiente de verificación
+    await client.query(
+      `INSERT INTO pagos (
+        carrito_id,
+        monto_total,
+        moneda,
+        estado,
+        pedido_id,
+        metadata
+      ) VALUES ($1, $2, $3, $4, $5, $6)`,
+      [
+        carrito.id,
+        total,
+        'bob', // Bolivianos
+        'pendiente_verificacion',
+        pedidosCreados[0],
+        JSON.stringify({
+          metodo_pago: 'qr',
+          items: itemsResult.rows.map(i => ({
+            comida_id: i.comida_id,
+            cantidad: i.cantidad,
+            precio_unitario: i.precio_unitario
+          }))
+        })
+      ]
+    );
+
+    await client.query(
+      'UPDATE carritos SET estado = $1 WHERE id = $2',
+      ['convertido', carrito.id]
+    );
+
+    await client.query('COMMIT');
+
+    res.json({
+      mensaje: 'Pago QR registrado. Verificaremos tu transacción pronto.',
+      pedidos: pedidosCreados,
+      monto_total: total,
+      metodo_pago: 'qr'
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('❌ Error en confirm-qr:', error);
+    res.status(500).json({ mensaje: 'Error al confirmar pedido', error: error.message });
   } finally {
     client.release();
   }
