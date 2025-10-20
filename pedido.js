@@ -1,4 +1,4 @@
-// pedidos.js - Versión Mejorada y Optimizada
+// pedidos.js - Versión con Pagos Simulados
 const express = require('express');
 const pool = require('./db');
 const router = express.Router();
@@ -45,7 +45,7 @@ router.get('/pedidos', async (req, res) => {
   try {
     const estado = norm(req.query.estado);
     const email = norm(req.query.email);
-    const limit = Math.min(toInt(req.query.limit) || 100, 500); // Max 500
+    const limit = Math.min(toInt(req.query.limit) || 100, 500);
     const offset = toInt(req.query.offset) || 0;
 
     const where = [];
@@ -69,7 +69,6 @@ router.get('/pedidos', async (req, res) => {
 
     const { rows } = await pool.query(sql, params);
     
-    // Obtener total de registros para paginación
     let countSql = 'SELECT COUNT(*) as total FROM pedido';
     if (where.length) {
       countSql += ` WHERE ${where.join(' AND ')}`;
@@ -138,7 +137,6 @@ router.post('/pedidos', async (req, res) => {
     metodo_pago
   } = req.body;
 
-  // Validación de campos requeridos
   if (!comida_id || !nombre_cliente || !email_cliente || !cantidad) {
     return res.status(400).json({ 
       mensaje: 'Los campos comida_id, nombre_cliente, email_cliente y cantidad son requeridos' 
@@ -162,7 +160,6 @@ router.post('/pedidos', async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // Verificar que la comida existe y obtener sus datos
     const comidaResult = await client.query(
       'SELECT id, precio, nombre, empresa FROM comidas WHERE id = $1',
       [comida_id]
@@ -177,7 +174,6 @@ router.post('/pedidos', async (req, res) => {
     const precioUnitario = parseFloat(comida.precio);
     const precioTotal = precioUnitario * cantidadInt;
 
-    // Crear el pedido
     const result = await client.query(`
       INSERT INTO pedido (
         comida_id, 
@@ -202,14 +198,13 @@ router.post('/pedidos', async (req, res) => {
       precioTotal, 
       notas || `Pedido de ${comida.nombre} - ${comida.empresa || 'Restaurante'}`,
       metodo_pago || 'efectivo',
-      'pendiente'
+      'confirmado'
     ]);
 
     await client.query('COMMIT');
 
     const pedidoId = result.rows[0].id;
 
-    // Obtener el pedido completo con la vista
     const pedidoCompleto = await pool.query(
       'SELECT * FROM vista_pedidos_completos WHERE id = $1',
       [pedidoId]
@@ -231,27 +226,19 @@ router.post('/pedidos', async (req, res) => {
 
 // ============================================
 // POST /api/pedidos/crear-desde-carrito
-// Crea pedidos desde el carrito (modo simulado)
+// Crea pedidos desde el carrito (MODO SIMULADO)
 // ============================================
 router.post('/pedidos/crear-desde-carrito', requireSession, async (req, res) => {
-  const { metodo_pago, estado } = req.body;
+  const { metodo_pago } = req.body;
   const sessionId = req.sessionId;
 
-  console.log('📦 Creando pedidos desde carrito');
+  console.log('📦 [SIMULADO] Creando pedidos desde carrito');
   console.log('   Session ID:', sessionId);
   console.log('   Método de pago:', metodo_pago);
 
-  // Validación del método de pago
   if (metodo_pago && !METODOS_PAGO_VALIDOS.includes(metodo_pago)) {
     return res.status(400).json({ 
       mensaje: `Método de pago no válido. Permitidos: ${METODOS_PAGO_VALIDOS.join(', ')}` 
-    });
-  }
-
-  // Validación del estado
-  if (estado && !ESTADOS_VALIDOS.includes(estado)) {
-    return res.status(400).json({ 
-      mensaje: `Estado no válido. Permitidos: ${ESTADOS_VALIDOS.join(', ')}` 
     });
   }
 
@@ -259,7 +246,6 @@ router.post('/pedidos/crear-desde-carrito', requireSession, async (req, res) => 
   try {
     await client.query('BEGIN');
 
-    // Obtener carrito activo
     const carritoResult = await client.query(
       'SELECT * FROM carritos WHERE session_id = $1 AND estado = $2',
       [sessionId, 'activo']
@@ -272,7 +258,6 @@ router.post('/pedidos/crear-desde-carrito', requireSession, async (req, res) => 
 
     const carrito = carritoResult.rows[0];
 
-    // Validar información del cliente
     if (!carrito.nombre_cliente || !carrito.email_cliente) {
       await client.query('ROLLBACK');
       return res.status(400).json({
@@ -280,7 +265,6 @@ router.post('/pedidos/crear-desde-carrito', requireSession, async (req, res) => 
       });
     }
 
-    // Obtener items del carrito con información de comidas
     const itemsResult = await client.query(
       `SELECT ci.*, c.nombre, c.precio, c.precio_original, 
               c.descuento_porcentaje, c.empresa, c.categoria
@@ -295,7 +279,6 @@ router.post('/pedidos/crear-desde-carrito', requireSession, async (req, res) => 
       return res.status(400).json({ mensaje: 'El carrito está vacío' });
     }
 
-    // Calcular total y validar precios
     let total = 0;
     for (const item of itemsResult.rows) {
       const precio = parseFloat(item.precio || item.precio_unitario || 0);
@@ -314,12 +297,9 @@ router.post('/pedidos/crear-desde-carrito', requireSession, async (req, res) => 
       return res.status(400).json({ mensaje: 'El total del pedido debe ser mayor a 0' });
     }
 
-    // Determinar estado según método de pago
-    const estadoPedido = estado || 
-      (metodo_pago === 'efectivo' ? 'pendiente_pago' : 
-       metodo_pago === 'qr' ? 'pendiente_verificacion' : 'confirmado');
+    // MODO SIMULADO: Todos los pagos se confirman automáticamente
+    const estadoPedido = 'confirmado';
 
-    // Crear pedidos (uno por cada item)
     const pedidosCreados = [];
     for (const item of itemsResult.rows) {
       const precioUnitario = parseFloat(item.precio || item.precio_unitario);
@@ -329,7 +309,8 @@ router.post('/pedidos/crear-desde-carrito', requireSession, async (req, res) => 
       const notasPedido = [
         item.notas,
         item.empresa ? `Restaurante: ${item.empresa}` : null,
-        item.descuento_porcentaje > 0 ? `Descuento: ${item.descuento_porcentaje}%` : null
+        item.descuento_porcentaje > 0 ? `Descuento: ${item.descuento_porcentaje}%` : null,
+        `Pago ${metodo_pago || 'simulado'} - SIMULADO`
       ].filter(Boolean).join(' | ');
 
       const pedidoResult = await client.query(
@@ -367,10 +348,12 @@ router.post('/pedidos/crear-desde-carrito', requireSession, async (req, res) => 
     const metadataPago = {
       metodo_pago: metodo_pago || 'simulado',
       modo: 'simulado',
+      pago_automatico: true,
       items: pedidosCreados.length,
       total_items: pedidosCreados.reduce((sum, p) => sum + p.cantidad, 0),
       cliente: carrito.nombre_cliente,
-      email: carrito.email_cliente
+      email: carrito.email_cliente,
+      fecha_simulacion: new Date().toISOString()
     };
 
     await client.query(
@@ -392,7 +375,6 @@ router.post('/pedidos/crear-desde-carrito', requireSession, async (req, res) => 
       ]
     );
 
-    // Marcar carrito como convertido
     await client.query(
       `UPDATE carritos 
        SET estado = $1, fecha_actualizacion = NOW() 
@@ -402,18 +384,20 @@ router.post('/pedidos/crear-desde-carrito', requireSession, async (req, res) => 
 
     await client.query('COMMIT');
 
-    console.log(`✅ ${pedidosCreados.length} pedido(s) creado(s) exitosamente`);
+    console.log(`✅ [SIMULADO] ${pedidosCreados.length} pedido(s) confirmado(s) automáticamente`);
     console.log(`   Total: Bs ${total.toFixed(2)}`);
 
     res.status(201).json({
-      mensaje: 'Pedidos creados exitosamente',
+      mensaje: '¡Pago simulado exitoso! Pedidos confirmados automáticamente',
+      modo: 'simulado',
       pedidos: pedidosCreados,
       resumen: {
         cantidad_pedidos: pedidosCreados.length,
         total_items: pedidosCreados.reduce((sum, p) => sum + p.cantidad, 0),
         total: total,
         metodo_pago: metodo_pago || 'simulado',
-        estado: estadoPedido
+        estado: estadoPedido,
+        pago_automatico: true
       }
     });
 
@@ -448,7 +432,6 @@ router.put('/pedidos/:id', async (req, res) => {
     notas 
   } = req.body;
 
-  // Validación
   if (!nombre_cliente || !email_cliente || !cantidad) {
     return res.status(400).json({ 
       mensaje: 'Los campos nombre_cliente, email_cliente y cantidad son requeridos' 
@@ -472,7 +455,6 @@ router.put('/pedidos/:id', async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // Obtener el pedido actual
     const pedidoActual = await client.query(
       'SELECT * FROM pedido WHERE id = $1', 
       [id]
@@ -485,7 +467,6 @@ router.put('/pedidos/:id', async (req, res) => {
 
     const pedido = pedidoActual.rows[0];
 
-    // Si cambió la cantidad, recalcular el precio total
     let precioTotal = pedido.precio_total;
     if (cantidadInt !== parseInt(pedido.cantidad)) {
       const comidaResult = await client.query(
@@ -502,7 +483,6 @@ router.put('/pedidos/:id', async (req, res) => {
       precioTotal = precioUnitario * cantidadInt;
     }
 
-    // Actualizar el pedido
     await client.query(`
       UPDATE pedido 
       SET nombre_cliente = $1, 
@@ -529,7 +509,6 @@ router.put('/pedidos/:id', async (req, res) => {
 
     await client.query('COMMIT');
 
-    // Obtener pedido actualizado
     const pedidoCompleto = await pool.query(
       'SELECT * FROM vista_pedidos_completos WHERE id = $1',
       [id]
@@ -578,7 +557,6 @@ router.patch('/pedidos/:id/estado', async (req, res) => {
       return res.status(404).json({ mensaje: 'Pedido no encontrado' });
     }
 
-    // Obtener el pedido completo actualizado
     const pedidoCompleto = await pool.query(
       'SELECT * FROM vista_pedidos_completos WHERE id = $1',
       [id]
