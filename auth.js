@@ -1,12 +1,9 @@
-// auth.js - Sistema de autenticación con roles
+// auth.js - Sistema de autenticación con DEBUG
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const pool = require('./db');
 const router = express.Router();
 
-/**
- * Helpers de validación
- */
 const sanitizeUsername = (v) => (v || '').trim().toLowerCase();
 const sanitizeEmail = (v) => (v || '').trim().toLowerCase();
 const sanitizePassword = (v) => (v || '').trim();
@@ -21,44 +18,86 @@ const isValidEmail = (e) =>
 const isValidPassword = (p) =>
   typeof p === 'string' && p.length >= 6 && p.length <= 255;
 
-/**
- * POST /auth/login
- */
 router.post('/login', async (req, res) => {
+  console.log('\n🔐 ===== INTENTO DE LOGIN =====');
+  console.log('📦 Body recibido:', req.body);
+  
   let { username, password } = req.body || {};
+  
+  console.log('📝 Username original:', username);
+  console.log('🔑 Password recibida (length):', password?.length);
 
   username = sanitizeUsername(username);
   password = sanitizePassword(password);
 
+  console.log('📝 Username sanitizado:', username);
+  console.log('🔑 Password sanitizada (length):', password?.length);
+
   if (!username || !password) {
+    console.log('❌ Faltan campos');
     return res.status(400).json({ mensaje: 'Usuario y contraseña son requeridos' });
   }
+  
   if (!isValidUsername(username) || !isValidPassword(password)) {
+    console.log('❌ Formato inválido');
+    console.log('   Username válido?', isValidUsername(username));
+    console.log('   Password válido?', isValidPassword(password));
     return res.status(400).json({ mensaje: 'Credenciales con formato inválido' });
   }
 
   try {
+    console.log('🔍 Buscando usuario en BD:', username);
+    
     const { rows } = await pool.query(
       'SELECT id, username, password, rol, email, nombre_completo FROM usuarios WHERE username = $1',
       [username]
     );
 
+    console.log('📊 Resultados encontrados:', rows.length);
+
     if (rows.length === 0) {
+      console.log('❌ Usuario no encontrado en BD');
       return res.status(401).json({ mensaje: 'Usuario o contraseña inválidos' });
     }
 
     const usuario = rows[0];
+    console.log('✅ Usuario encontrado:');
+    console.log('   ID:', usuario.id);
+    console.log('   Username:', usuario.username);
+    console.log('   Email:', usuario.email);
+    console.log('   Rol:', usuario.rol);
+    console.log('   Password hash length:', usuario.password?.length);
+    console.log('   Password hash (primeros 20):', usuario.password?.substring(0, 20));
+
+    console.log('🔐 Comparando contraseñas...');
+    console.log('   Password ingresada:', password);
+    console.log('   Hash en BD:', usuario.password?.substring(0, 30) + '...');
+    
     const ok = await bcrypt.compare(password, usuario.password);
+    
+    console.log('🔐 Resultado de bcrypt.compare:', ok);
 
     if (!ok) {
+      console.log('❌ Contraseña incorrecta');
+      
+      // TEST: Intentar con el hash directo
+      console.log('🧪 TEST: Verificando hash de "123456"...');
+      const testHash = '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy';
+      const testCompare = await bcrypt.compare('123456', testHash);
+      console.log('   bcrypt.compare("123456", testHash):', testCompare);
+      
       return res.status(401).json({ mensaje: 'Usuario o contraseña inválidos' });
     }
 
-    // Registrar último login
+    console.log('✅ Login exitoso!');
+
     await pool.query(
       'UPDATE usuarios SET ultimo_login = NOW() WHERE id = $1',
       [usuario.id]
     );
+
+    console.log('💾 Último login actualizado');
+    console.log('📤 Enviando respuesta exitosa');
 
     return res.status(200).json({
       mensaje: 'Login exitoso',
@@ -71,14 +110,12 @@ router.post('/login', async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('❌ Error en /auth/login:', error);
+    console.error('❌ ERROR en /auth/login:', error);
+    console.error('   Stack:', error.stack);
     return res.status(500).json({ mensaje: 'Error al realizar el login' });
   }
 });
 
-/**
- * POST /auth/register
- */
 router.post('/register', async (req, res) => {
   let { username, password, email, nombre_completo, rol } = req.body || {};
 
@@ -88,7 +125,6 @@ router.post('/register', async (req, res) => {
   nombre_completo = (nombre_completo || '').trim();
   rol = (rol || 'usuario').toLowerCase();
 
-  // Validaciones
   if (!username || !password || !email || !nombre_completo) {
     return res.status(400).json({
       mensaje: 'Usuario, contraseña, email y nombre completo son requeridos'
@@ -123,7 +159,6 @@ router.post('/register', async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // Verificar username duplicado
     const usernameExists = await client.query(
       'SELECT 1 FROM usuarios WHERE username = $1',
       [username]
@@ -135,7 +170,6 @@ router.post('/register', async (req, res) => {
       });
     }
 
-    // Verificar email duplicado
     const emailExists = await client.query(
       'SELECT 1 FROM usuarios WHERE email = $1',
       [email]
@@ -187,10 +221,6 @@ router.post('/register', async (req, res) => {
   }
 });
 
-/**
- * GET /auth/profile
- * Obtener información del usuario autenticado
- */
 router.get('/profile/:userId', async (req, res) => {
   const userId = parseInt(req.params.userId);
 
@@ -216,10 +246,6 @@ router.get('/profile/:userId', async (req, res) => {
   }
 });
 
-/**
- * PUT /auth/profile/:userId
- * Actualizar información del perfil
- */
 router.put('/profile/:userId', async (req, res) => {
   const userId = parseInt(req.params.userId);
   let { nombre_completo, email } = req.body || {};
