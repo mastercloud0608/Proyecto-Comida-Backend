@@ -124,7 +124,8 @@ router.post('/checkout/create-payment-intent', async (req, res) => {
 
     // Obtener items
     const itemsResult = await client.query(
-      `SELECT ci.*, c.nombre, c.precio
+      `SELECT ci.*, c.nombre, c.precio, c.precio_original, 
+              c.descuento_porcentaje, c.empresa, c.categoria
        FROM carrito_items ci
        JOIN comidas c ON c.id = ci.comida_id
        WHERE ci.carrito_id = $1`,
